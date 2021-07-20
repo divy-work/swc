@@ -16,7 +16,7 @@ fn tr(t: &mut Tester, options: Options) -> impl Fold {
     chain!(
         jsx(t.cm.clone(), Some(t.comments.clone()), options),
         display_name(),
-        classes(),
+        classes(Some(t.comments.clone())),
         arrow(),
     )
 }
@@ -706,7 +706,7 @@ test!(
 "#,
     r#"
 React.createElement("div", {
-  id: "w\xF4w"
+  id: "w\\xf4w"
 });
 React.createElement("div", {
   id: "w"
@@ -1147,7 +1147,7 @@ test!(
                 ..Default::default()
             }
         ),
-        common_js(Mark::fresh(Mark::root()), Default::default())
+        common_js(Mark::fresh(Mark::root()), Default::default(), None)
     ),
     issue_351,
     "import React from 'react';
@@ -1189,7 +1189,7 @@ test!(
                 ..Default::default()
             }
         ),
-        common_js(Mark::fresh(Mark::root()), Default::default())
+        common_js(Mark::fresh(Mark::root()), Default::default(), None)
     ),
     issue_517,
     "import React from 'react';
@@ -1236,7 +1236,7 @@ test!(
         ..Default::default()
     }),
     |t| chain!(
-        classes(),
+        classes(Some(t.comments.clone())),
         jsx(t.cm.clone(), Some(t.comments.clone()), Default::default())
     ),
     regression_2775,

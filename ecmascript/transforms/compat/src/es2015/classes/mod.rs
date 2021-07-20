@@ -1,4 +1,3 @@
-pub(crate) use self::super_field::SuperFieldAccessFolder;
 use self::{
     constructor::{
         constructor_fn, make_possible_return_value, replace_this_in_constructor, ConstructorFolder,
@@ -8,10 +7,14 @@ use self::{
 };
 use fxhash::FxBuildHasher;
 use std::iter;
+use swc_common::comments::Comments;
 use swc_common::{Mark, Spanned, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::helper;
 use swc_ecma_transforms_base::native::is_native;
+use swc_ecma_transforms_base::perf::Check;
+use swc_ecma_transforms_classes::super_field::SuperFieldAccessFolder;
+use swc_ecma_transforms_macros::fast_path;
 use swc_ecma_utils::quote_expr;
 use swc_ecma_utils::quote_str;
 use swc_ecma_utils::{
@@ -22,14 +25,17 @@ use swc_ecma_utils::{private_ident, quote_ident};
 use swc_ecma_visit::noop_visit_type;
 use swc_ecma_visit::{noop_fold_type, Fold, FoldWith, Node, Visit, VisitWith};
 
-#[macro_use]
-mod macros;
 mod constructor;
 mod prop_name;
-mod super_field;
 
-pub fn classes() -> impl Fold {
-    Classes::default()
+pub fn classes<C>(comments: Option<C>) -> impl Fold
+where
+    C: Comments,
+{
+    Classes {
+        in_strict: false,
+        comments,
+    }
 }
 
 type IndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
@@ -66,8 +72,12 @@ type IndexMap<K, V> = indexmap::IndexMap<K, V, FxBuildHasher>;
 /// }();
 /// ```
 #[derive(Default, Clone, Copy)]
-struct Classes {
+struct Classes<C>
+where
+    C: Comments,
+{
     in_strict: bool,
+    comments: Option<C>,
 }
 
 struct Data {
@@ -77,7 +87,10 @@ struct Data {
     get: Option<Box<Expr>>,
 }
 
-impl Classes {
+impl<C> Classes<C>
+where
+    C: Comments,
+{
     fn fold_stmt_like<T>(&mut self, stmts: Vec<T>) -> Vec<T>
     where
         T: StmtLike + ModuleItemLike + FoldWith<Self>,
@@ -173,7 +186,11 @@ impl Classes {
     }
 }
 
-impl Fold for Classes {
+#[fast_path(ClassFinder)]
+impl<C> Fold for Classes<C>
+where
+    C: Comments,
+{
     noop_fold_type!();
 
     fn fold_module_items(&mut self, items: Vec<ModuleItem>) -> Vec<ModuleItem> {
@@ -185,26 +202,6 @@ impl Fold for Classes {
     }
 
     fn fold_decl(&mut self, n: Decl) -> Decl {
-        fn should_work(node: &Decl) -> bool {
-            struct Visitor {
-                found: bool,
-            }
-            impl Visit for Visitor {
-                noop_visit_type!();
-
-                fn visit_class(&mut self, _: &Class, _: &dyn Node) {
-                    self.found = true
-                }
-            }
-            let mut v = Visitor { found: false };
-            node.visit_with(&Invalid { span: DUMMY_SP } as _, &mut v);
-            v.found
-        }
-        // fast path
-        if !should_work(&n) {
-            return n;
-        }
-
         let n = match n {
             Decl::Class(decl) => Decl::Var(self.fold_class_as_var_decl(decl.ident, decl.class)),
             _ => n,
@@ -222,16 +219,18 @@ impl Fold for Classes {
     }
 }
 
-impl Classes {
+impl<C> Classes<C>
+where
+    C: Comments,
+{
     fn fold_class_as_var_decl(&mut self, ident: Ident, class: Class) -> VarDecl {
-        let span = class.span;
         let rhs = self.fold_class(Some(ident.clone()), class);
 
         VarDecl {
-            span,
+            span: DUMMY_SP,
             kind: VarDeclKind::Let,
             decls: vec![VarDeclarator {
-                span,
+                span: DUMMY_SP,
                 init: Some(Box::new(rhs)),
                 // Foo in var Foo =
                 name: ident.into(),
@@ -254,6 +253,8 @@ impl Classes {
     /// }()
     /// ```
     fn fold_class(&mut self, class_name: Option<Ident>, class: Class) -> Expr {
+        let span = class.span;
+
         // Ident of the super class *inside* function.
         let super_ident = class
             .super_class
@@ -348,12 +349,12 @@ impl Classes {
             stmts,
         };
 
-        Expr::Call(CallExpr {
+        let call = CallExpr {
             span: DUMMY_SP,
             callee: Expr::Fn(FnExpr {
                 ident: None,
                 function: Function {
-                    span: DUMMY_SP,
+                    span,
                     is_async: false,
                     is_generator: false,
                     params,
@@ -366,7 +367,12 @@ impl Classes {
             .as_callee(),
             args,
             type_args: Default::default(),
-        })
+        };
+        if let Some(comments) = &self.comments {
+            comments.add_pure_comment(span.lo);
+        }
+
+        Expr::Call(call)
     }
 
     /// Returned `stmts` contains `return Foo`
@@ -376,7 +382,6 @@ impl Classes {
         super_class_ident: Option<Ident>,
         class: Class,
     ) -> Vec<Stmt> {
-        let is_named = class_name.is_some();
         let class_name = class_name.unwrap_or_else(|| quote_ident!("_class"));
         let mut stmts = vec![];
 
@@ -586,7 +591,7 @@ impl Classes {
                 .into_stmt(),
             );
 
-            if is_named && stmts.len() == 2 {
+            if stmts.len() == 2 {
                 return stmts;
             }
         }
@@ -707,6 +712,7 @@ impl Classes {
                         macro_rules! add {
                             ($field:expr, $kind:expr, $s:literal) => {{
                                 if let Some(value) = $field {
+                                    let value = escape_keywords(value);
                                     props.push(PropOrSpread::Prop(Box::new(Prop::KeyValue(
                                         KeyValueProp {
                                             key: PropName::Ident(quote_ident!($s)),
@@ -855,20 +861,6 @@ impl Classes {
     }
 }
 
-/// Creates
-///
-/// ```js
-/// Child.__proto__ || Object.getPrototypeOf(Child)
-/// ```
-fn get_prototype_of(obj: Expr) -> Expr {
-    Expr::Call(CallExpr {
-        span: DUMMY_SP,
-        callee: helper!(get_prototype_of, "getPrototypeOf"),
-        args: vec![obj.as_arg()],
-        type_args: Default::default(),
-    })
-}
-
 fn inject_class_call_check(c: &mut Vec<Stmt>, name: Ident) {
     let class_call_check = CallExpr {
         span: DUMMY_SP,
@@ -926,4 +918,41 @@ fn is_always_initialized(body: &[Stmt]) -> bool {
     }
 
     true
+}
+
+fn escape_keywords(mut e: Box<Expr>) -> Box<Expr> {
+    match &mut *e {
+        Expr::Fn(f) => {
+            if let Some(i) = &mut f.ident {
+                if i.is_reserved()
+                    || i.is_reserved_in_strict_mode(true)
+                    || i.is_reserved_in_strict_bind()
+                {
+                    i.sym = format!("_{}", i.sym).into();
+                }
+            }
+        }
+        _ => {}
+    }
+
+    e
+}
+
+#[derive(Default)]
+struct ClassFinder {
+    found: bool,
+}
+
+impl Visit for ClassFinder {
+    noop_visit_type!();
+
+    fn visit_class(&mut self, _: &Class, _: &dyn Node) {
+        self.found = true
+    }
+}
+
+impl Check for ClassFinder {
+    fn should_handle(&self) -> bool {
+        self.found
+    }
 }

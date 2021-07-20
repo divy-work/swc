@@ -180,7 +180,7 @@ foo(1, 2, 3);"#
 
 test!(
     syntax(),
-    |_| chain!(classes(), tr()),
+    |t| chain!(classes(Some(t.comments.clone())), tr()),
     default_iife_4253,
     r#"class Ref {
   constructor(id = ++Ref.nextID) {
@@ -216,7 +216,7 @@ expect(new Ref().id).toBe(2);"#
 
 test!(
     syntax(),
-    |_| chain!(classes(), tr()),
+    |t| chain!(classes(Some(t.comments.clone())), tr()),
     default_iife_self,
     r#"class Ref {
   constructor(ref = Ref) {
@@ -1211,7 +1211,11 @@ function d(thing) {
 
 test!(
     syntax(),
-    |_| chain!(tr(), classes(), spread(Default::default())),
+    |t| chain!(
+        tr(),
+        classes(Some(t.comments.clone())),
+        spread(Default::default())
+    ),
     rest_nested_iife,
     r#"function broken(x, ...foo) {
   if (true) {
@@ -1632,4 +1636,116 @@ export default function reducer(state = initialState, action = {}) {
       let state = param === void 0 ? initialState : param, action = param1 === void 0 ? {
       } : param1;
   }"
+);
+
+test!(
+    syntax(),
+    |_| parameters(),
+    rest_in_top_level_arrow_1,
+    "
+    const arrow = (...args) => {
+      console.log(args);
+    }
+    ",
+    "
+    const arrow = function() {
+        for(let _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++){
+            args[_key] = arguments[_key];
+        }
+        console.log(args);
+    };
+    "
+);
+
+test!(
+    syntax(),
+    |_| parameters(),
+    rest_in_top_level_arrow_2,
+    "
+    const arrow = () => (...args) => {
+      console.log(args);
+    }
+    ",
+    "
+    const arrow = ()=>function() {
+        for(let _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++){
+            args[_key] = arguments[_key];
+        }
+        console.log(args);
+    };
+    "
+);
+
+test!(
+    syntax(),
+    |_| parameters(),
+    rest_in_top_level_arrow_3,
+    "
+    const arrow = () => (...args) => {
+      console.log(this, args);
+    }
+    ",
+    "
+    const arrow = ()=>{
+        var self = this;
+        return function() {
+            for(let _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; \
+     _key++){
+                args[_key] = arguments[_key];
+            }
+            console.log(self, args);
+        };
+    };
+    "
+);
+
+test!(
+    syntax(),
+    |_| parameters(),
+    rest_in_top_level_arrow_4,
+    "
+    const arrow = () => (this, (...args) => {
+      console.log(this, args);
+    })
+    ",
+    "
+    const arrow = ()=>{
+      var self = this;
+      return this, function() {
+          for(let _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++){
+              args[_key] = arguments[_key];
+          }
+          console.log(self, args);
+      };
+    };
+    "
+);
+
+test!(
+    syntax(),
+    |_| parameters(),
+    rest_in_top_level_arrow_nested_1,
+    "
+    const arrow = (...args) => (this, () => (...args) => {
+      console.log(this, args);
+    })
+    ",
+    "
+    var self = this;
+    const arrow = function() {
+        for(let _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++){
+            args[_key] = arguments[_key];
+        }
+        return self, ()=>{
+            var self1 = this;
+            return function() {
+                for(let _len1 = arguments.length, args = new Array(_len1), _key1 = 0; _key1 < \
+     _len1; _key1++){
+                    args[_key1] = arguments[_key1];
+                }
+                console.log(self1, args);
+            };
+        };
+    };
+    "
 );

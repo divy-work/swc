@@ -1,7 +1,7 @@
 use super::*;
 use swc_common::{chain, Mark};
 use swc_ecma_transforms_base::{hygiene::hygiene, resolver::resolver_with_mark};
-use swc_ecma_transforms_module::common_js;
+use swc_ecma_transforms_module::common_js::common_js;
 use swc_ecma_transforms_testing::{test, Tester};
 
 fn tr(t: &mut Tester) -> impl Fold {
@@ -1095,7 +1095,7 @@ test!(
                 Some(t.comments.clone())
             ),
             resolver_with_mark(mark),
-            common_js(mark, Default::default())
+            common_js(mark, Default::default(), None)
         )
     },
     include_hook_signature_in_commonjs,
@@ -1374,5 +1374,33 @@ test!(
     var _c;
     
     import_meta_refreshReg(_c, "Bar");
+"#
+);
+
+test!(
+    ::swc_ecma_parser::Syntax::Typescript(::swc_ecma_parser::TsConfig {
+        tsx: true,
+        ..Default::default()
+    }),
+    tr,
+    issue_1865,
+    r#"
+    function useHooks() {
+      return useMemo(() => 1);
+    }
+  
+    declare module 'x' {}
+"#,
+    r#"
+    var _s = $RefreshSig$();
+
+    function useHooks() {
+      _s();
+      return useMemo(() => 1);
+    }
+
+    _s(useHooks, "useMemo{}");
+
+    declare module 'x' {}
 "#
 );

@@ -1,7 +1,5 @@
 #![deny(unused)]
 
-pub use sourcemap;
-
 pub use crate::builder::PassBuilder;
 use crate::config::{
     BuiltConfig, Config, ConfigFile, InputSourceMap, JscTarget, Merge, Options, Rc, RootMode,
@@ -11,6 +9,7 @@ use anyhow::{bail, Context, Error};
 use dashmap::DashMap;
 use serde::Serialize;
 use serde_json::error::Category;
+pub use sourcemap;
 use std::{
     fs::{read_to_string, File},
     path::{Path, PathBuf},
@@ -18,22 +17,32 @@ use std::{
 };
 use swc_common::{
     chain,
-    comments::{Comment, Comments},
+    comments::{Comment, CommentKind, Comments},
     errors::Handler,
     input::StringInput,
-    BytePos, FileName, Globals, SourceFile, SourceMap, Spanned, GLOBALS,
+    source_map::SourceMapGenConfig,
+    BytePos, FileName, Globals, SourceFile, SourceMap, Spanned, DUMMY_SP, GLOBALS,
 };
 use swc_ecma_ast::Program;
 use swc_ecma_codegen::{self, Emitter, Node};
+use swc_ecma_loader::resolvers::{lru::CachingResolver, node::NodeResolver, tsc::TsConfigResolver};
 use swc_ecma_parser::{lexer::Lexer, Parser, Syntax};
 use swc_ecma_transforms::{
     helpers::{self, Helpers},
+    modules::path::NodeImportResolver,
     pass::noop,
 };
 use swc_ecma_visit::FoldWith;
 
 mod builder;
 pub mod config;
+pub mod resolver {
+    use swc_ecma_loader::resolvers::lru::CachingResolver;
+
+    pub type NodeResolver = CachingResolver<swc_ecma_loader::resolvers::node::NodeResolver>;
+}
+
+type SwcImportResolver = Arc<NodeImportResolver<CachingResolver<TsConfigResolver<NodeResolver>>>>;
 
 pub struct Compiler {
     /// swc uses rustc's span interning.
@@ -228,10 +237,13 @@ impl Compiler {
 
     /// Converts ast node to source string and sourcemap.
     ///
-    /// TODO: Receive target file path to fix https://github.com/swc-project/swc/issues/1255
+    ///
+    /// This method receives target file path, but does not write file to the
+    /// path. See: https://github.com/swc-project/swc/issues/1255
     pub fn print<T>(
         &self,
         node: &T,
+        output_path: Option<PathBuf>,
         target: JscTarget,
         source_map: SourceMapsConfig,
         orig: Option<&sourcemap::SourceMap>,
@@ -267,7 +279,7 @@ impl Compiler {
                         .context("failed to emit module")?;
                 }
                 // Invalid utf8 is valid in javascript world.
-                unsafe { String::from_utf8_unchecked(buf) }
+                String::from_utf8(buf).expect("invalid utf8 characeter detected")
             };
             let (code, map) = match source_map {
                 SourceMapsConfig::Bool(v) => {
@@ -275,7 +287,13 @@ impl Compiler {
                         let mut buf = vec![];
 
                         self.cm
-                            .build_source_map_from(&mut src_map_buf, orig)
+                            .build_source_map_with_config(
+                                &mut src_map_buf,
+                                orig,
+                                SwcSourceMapConfig {
+                                    output_path: output_path.as_deref(),
+                                },
+                            )
                             .to_writer(&mut buf)
                             .context("failed to write source map")?;
                         let map = String::from_utf8(buf).context("source map is not utf-8")?;
@@ -290,7 +308,13 @@ impl Compiler {
                     let mut buf = vec![];
 
                     self.cm
-                        .build_source_map_from(&mut src_map_buf, orig)
+                        .build_source_map_with_config(
+                            &mut src_map_buf,
+                            orig,
+                            SwcSourceMapConfig {
+                                output_path: output_path.as_deref(),
+                            },
+                        )
                         .to_writer(&mut buf)
                         .context("failed to write source map file")?;
                     let map = String::from_utf8(buf).context("source map is not utf-8")?;
@@ -307,6 +331,37 @@ impl Compiler {
 
             Ok(TransformOutput { code, map })
         })
+    }
+}
+
+struct SwcSourceMapConfig<'a> {
+    /// Output path of the `.map` file.
+    output_path: Option<&'a Path>,
+}
+
+impl SourceMapGenConfig for SwcSourceMapConfig<'_> {
+    fn file_name_to_source(&self, f: &FileName) -> String {
+        let base_path = match self.output_path {
+            Some(v) => v,
+            None => return f.to_string(),
+        };
+        let target = match f {
+            FileName::Real(v) => v,
+            _ => return f.to_string(),
+        };
+
+        let rel = pathdiff::diff_paths(&target, base_path);
+        match rel {
+            Some(v) => {
+                let s = v.to_string_lossy().to_string();
+                if cfg!(target_os = "windows") {
+                    s.replace("\\", "/")
+                } else {
+                    s
+                }
+            }
+            None => f.to_string(),
+        }
     }
 }
 
@@ -411,8 +466,11 @@ impl Compiler {
                 Some(v) => v,
                 None => return Ok(None),
             };
+
             let built = opts.build(
                 &self.cm,
+                name,
+                opts.output_path.as_deref(),
                 &self.handler,
                 opts.is_module,
                 Some(config),
@@ -473,8 +531,9 @@ impl Compiler {
                 source_maps: config.source_maps,
                 input_source_map: config.input_source_map,
                 is_module: config.is_module,
+                output_path: config.output_path,
             };
-            let orig = self.get_orig_src_map(&fm, &opts.input_source_map)?;
+            let orig = self.get_orig_src_map(&fm, &opts.config.input_source_map)?;
             let program = self.parse_js(
                 fm.clone(),
                 config.target,
@@ -503,7 +562,7 @@ impl Compiler {
         self.run(|| -> Result<_, Error> {
             let loc = self.cm.lookup_char_pos(program.span().lo());
             let fm = loc.file;
-            let orig = self.get_orig_src_map(&fm, &opts.input_source_map)?;
+            let orig = self.get_orig_src_map(&fm, &opts.config.input_source_map)?;
 
             let config = self.run(|| self.config_for_file(opts, &fm.name))?;
 
@@ -544,6 +603,7 @@ impl Compiler {
 
             self.print(
                 &program,
+                config.output_path,
                 config.target,
                 config.source_maps,
                 orig,
@@ -582,13 +642,13 @@ fn load_swcrc(path: &Path) -> Result<Rc, Error> {
         .map_err(convert_json_err)
 }
 
-type CommentMap = Arc<DashMap<BytePos, Vec<Comment>>>;
+type CommentMap = Arc<DashMap<BytePos, Vec<Comment>, ahash::RandomState>>;
 
 /// Multi-threaded implementation of [Comments]
 #[derive(Clone, Default)]
 pub struct SwcComments {
-    leading: CommentMap,
-    trailing: CommentMap,
+    pub leading: CommentMap,
+    pub trailing: CommentMap,
 }
 
 impl Comments for SwcComments {
@@ -601,7 +661,11 @@ impl Comments for SwcComments {
     }
 
     fn has_leading(&self, pos: BytePos) -> bool {
-        self.leading.contains_key(&pos)
+        if let Some(v) = self.leading.get(&pos) {
+            !v.is_empty()
+        } else {
+            false
+        }
     }
 
     fn move_leading(&self, from: BytePos, to: BytePos) {
@@ -616,6 +680,10 @@ impl Comments for SwcComments {
         self.leading.remove(&pos).map(|v| v.1)
     }
 
+    fn get_leading(&self, pos: BytePos) -> Option<Vec<Comment>> {
+        self.leading.get(&pos).map(|v| v.to_owned())
+    }
+
     fn add_trailing(&self, pos: BytePos, cmt: Comment) {
         self.trailing.entry(pos).or_default().push(cmt)
     }
@@ -625,7 +693,11 @@ impl Comments for SwcComments {
     }
 
     fn has_trailing(&self, pos: BytePos) -> bool {
-        self.trailing.contains_key(&pos)
+        if let Some(v) = self.trailing.get(&pos) {
+            !v.is_empty()
+        } else {
+            false
+        }
     }
 
     fn move_trailing(&self, from: BytePos, to: BytePos) {
@@ -638,5 +710,22 @@ impl Comments for SwcComments {
 
     fn take_trailing(&self, pos: BytePos) -> Option<Vec<Comment>> {
         self.trailing.remove(&pos).map(|v| v.1)
+    }
+
+    fn get_trailing(&self, pos: BytePos) -> Option<Vec<Comment>> {
+        self.trailing.get(&pos).map(|v| v.to_owned())
+    }
+
+    fn add_pure_comment(&self, pos: BytePos) {
+        let mut leading = self.leading.entry(pos).or_default();
+        let pure_comment = Comment {
+            kind: CommentKind::Block,
+            span: DUMMY_SP,
+            text: "#__PURE__".into(),
+        };
+
+        if !leading.iter().any(|c| c.text == pure_comment.text) {
+            leading.push(pure_comment);
+        }
     }
 }

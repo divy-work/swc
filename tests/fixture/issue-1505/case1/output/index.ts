@@ -49,7 +49,7 @@ var MyClass = function MyClass() {
     _classCallCheck(this, MyClass);
 };
 export var fn = function() {
-    var _class = function(MyClass1) {
+    var _class = /*#__PURE__*/ function(MyClass1) {
         "use strict";
         _inherits(_class, MyClass1);
         function _class() {
@@ -59,4 +59,5 @@ export var fn = function() {
         return _class;
     }(MyClass);
     _class.x = 5;
+    return _class;
 };

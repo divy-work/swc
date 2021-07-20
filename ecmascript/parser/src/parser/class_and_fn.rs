@@ -10,38 +10,40 @@ impl<'a, I: Tokens> Parser<I> {
     pub(super) fn parse_async_fn_expr(&mut self) -> PResult<Box<Expr>> {
         let start = cur_pos!(self);
         expect!(self, "async");
-        self.parse_fn(Some(start), vec![])
+        self.parse_fn(None, Some(start), vec![])
     }
 
     /// Parse function expression
     pub(super) fn parse_fn_expr(&mut self) -> PResult<Box<Expr>> {
-        self.parse_fn(None, vec![])
+        self.parse_fn(None, None, vec![])
     }
 
     pub(super) fn parse_async_fn_decl(&mut self, decorators: Vec<Decorator>) -> PResult<Decl> {
         let start = cur_pos!(self);
         expect!(self, "async");
-        self.parse_fn(Some(start), decorators)
+        self.parse_fn(None, Some(start), decorators)
     }
 
     pub(super) fn parse_fn_decl(&mut self, decorators: Vec<Decorator>) -> PResult<Decl> {
-        self.parse_fn(None, decorators)
+        self.parse_fn(None, None, decorators)
     }
 
     pub(super) fn parse_default_async_fn(
         &mut self,
+        start: BytePos,
         decorators: Vec<Decorator>,
     ) -> PResult<ExportDefaultDecl> {
-        let start = cur_pos!(self);
+        let start_of_async = cur_pos!(self);
         expect!(self, "async");
-        self.parse_fn(Some(start), decorators)
+        self.parse_fn(Some(start), Some(start_of_async), decorators)
     }
 
     pub(super) fn parse_default_fn(
         &mut self,
+        start: BytePos,
         decorators: Vec<Decorator>,
     ) -> PResult<ExportDefaultDecl> {
-        self.parse_fn(None, decorators)
+        self.parse_fn(Some(start), None, decorators)
     }
 
     pub(super) fn parse_class_decl(
@@ -316,7 +318,7 @@ impl<'a, I: Tokens> Parser<I> {
         // Allow `private declare`.
         let declare = declare || self.syntax().typescript() && eat!(self, "declare");
 
-        if declare && accessibility.is_none() {
+        let declare_token = if declare {
             // Handle declare(){}
             if self.is_class_method()? {
                 let key = Either::Right(PropName::Ident(Ident::new(
@@ -361,9 +363,11 @@ impl<'a, I: Tokens> Parser<I> {
                     false,
                 );
             } else {
-                self.emit_err(self.input.prev_span(), SyntaxError::TS1031);
+                Some(span!(self, start))
             }
-        }
+        } else {
+            None
+        };
 
         let static_token = {
             let start = cur_pos!(self);
@@ -425,7 +429,7 @@ impl<'a, I: Tokens> Parser<I> {
 
         self.parse_class_member_with_is_static(
             start,
-            declare,
+            declare_token,
             accessibility,
             static_token,
             decorators,
@@ -436,18 +440,21 @@ impl<'a, I: Tokens> Parser<I> {
     fn parse_class_member_with_is_static(
         &mut self,
         start: BytePos,
-        declare: bool,
+        declare_token: Option<Span>,
         accessibility: Option<Accessibility>,
         static_token: Option<Span>,
         decorators: Vec<Decorator>,
     ) -> PResult<ClassMember> {
-        let is_static = static_token.is_some();
+        let mut is_static = static_token.is_some();
 
         let mut is_abstract = false;
         let mut is_override = false;
         let mut readonly = None;
         let mut modifier_span = None;
-        while let Some(modifier) = self.parse_ts_modifier(&["abstract", "readonly", "override"])? {
+        let declare = declare_token.is_some();
+        while let Some(modifier) =
+            self.parse_ts_modifier(&["abstract", "readonly", "override", "static"])?
+        {
             modifier_span = Some(self.input.prev_span());
             match modifier {
                 "abstract" => {
@@ -455,6 +462,11 @@ impl<'a, I: Tokens> Parser<I> {
                         self.emit_err(
                             self.input.prev_span(),
                             SyntaxError::TS1030(js_word!("abstract")),
+                        );
+                    } else if is_override {
+                        self.emit_err(
+                            self.input.prev_span(),
+                            SyntaxError::TS1029(js_word!("abstract"), js_word!("override")),
                         );
                     } else {
                         is_abstract = true;
@@ -490,15 +502,18 @@ impl<'a, I: Tokens> Parser<I> {
                         readonly = Some(readonly_span);
                     }
                 }
+                "static" => {
+                    if is_override {
+                        self.emit_err(
+                            self.input.prev_span(),
+                            SyntaxError::TS1029(js_word!("static"), js_word!("override")),
+                        );
+                    }
+
+                    is_static = true;
+                }
                 _ => {}
             }
-        }
-
-        if is_static && is_override {
-            self.emit_err(
-                self.input.prev_span(),
-                SyntaxError::TS1243(js_word!("static"), js_word!("override")),
-            );
         }
 
         if self.input.syntax().typescript()
@@ -569,6 +584,11 @@ impl<'a, I: Tokens> Parser<I> {
             // handle a(){} / get(){} / set(){} / async(){}
 
             trace_cur!(self, parse_class_member_with_is_static__normal_class_method);
+
+            match declare_token {
+                Some(token) => self.emit_err(token, SyntaxError::TS1031),
+                None => {}
+            }
 
             if readonly.is_some() {
                 syntax_error!(self, span!(self, start), SyntaxError::ReadOnlyMethod);
@@ -706,7 +726,13 @@ impl<'a, I: Tokens> Parser<I> {
         {
             // handle async foo(){}
 
-            let is_override = is_override || self.parse_ts_modifier(&["override"])?.is_some();
+            if self.parse_ts_modifier(&["override"])?.is_some() {
+                is_override = true;
+                self.emit_err(
+                    self.input.prev_span(),
+                    SyntaxError::TS1029(js_word!("override"), js_word!("async")),
+                );
+            }
 
             let is_generator = eat!(self, '*');
             let key = self.parse_class_prop_name()?;
@@ -927,6 +953,7 @@ impl<'a, I: Tokens> Parser<I> {
 
     fn parse_fn<T>(
         &mut self,
+        start_of_output_type: Option<BytePos>,
         start_of_async: Option<BytePos>,
         decorators: Vec<Decorator>,
     ) -> PResult<T>
@@ -992,7 +1019,11 @@ impl<'a, I: Tokens> Parser<I> {
 
             // let body = p.parse_fn_body(is_async, is_generator)?;
 
-            Ok(T::finish_fn(span!(p, start), ident, f))
+            Ok(T::finish_fn(
+                span!(p, start_of_output_type.unwrap_or(start)),
+                ident,
+                f,
+            ))
         })
     }
 
@@ -1303,7 +1334,7 @@ impl OutputType for Decl {
         i.sym == js_word!("constructor")
     }
 
-    fn finish_fn(span: Span, ident: Ident, function: Function) -> Self {
+    fn finish_fn(_span: Span, ident: Ident, function: Function) -> Self {
         Decl::Fn(FnDecl {
             declare: false,
             ident,

@@ -23,7 +23,7 @@ impl<'a> Emitter<'a> {
 
     #[emitter]
     fn emit_class_decl(&mut self, node: &ClassDecl) -> Result {
-        self.emit_leading_comments_of_pos(node.span().lo(), false)?;
+        self.emit_leading_comments_of_span(node.span(), false)?;
 
         if node.declare {
             keyword!("declare");
@@ -37,14 +37,13 @@ impl<'a> Emitter<'a> {
         space!();
         emit!(node.ident);
         emit!(node.class.type_params);
-        formatting_space!();
 
         self.emit_class_trailing(&node.class)?;
     }
 
     #[emitter]
     fn emit_fn_decl(&mut self, node: &FnDecl) -> Result {
-        self.emit_leading_comments_of_pos(node.span().lo(), false)?;
+        self.emit_leading_comments_of_span(node.span(), false)?;
 
         if node.declare {
             keyword!("declare");
@@ -71,14 +70,17 @@ impl<'a> Emitter<'a> {
 
     #[emitter]
     fn emit_var_decl(&mut self, node: &VarDecl) -> Result {
-        self.emit_leading_comments_of_pos(node.span.lo(), false)?;
+        self.emit_leading_comments_of_span(node.span, false)?;
 
         if node.declare {
             keyword!("declare");
             space!();
         }
 
-        keyword!(node.kind.as_str());
+        {
+            let span = self.cm.span_until_char(node.span, ' ');
+            keyword!(span, node.kind.as_str());
+        }
         space!();
 
         self.emit_list(
@@ -90,7 +92,7 @@ impl<'a> Emitter<'a> {
 
     #[emitter]
     fn emit_var_declarator(&mut self, node: &VarDeclarator) -> Result {
-        self.emit_leading_comments_of_pos(node.span().lo(), false)?;
+        self.emit_leading_comments_of_span(node.span(), false)?;
 
         emit!(node.name);
 
@@ -114,6 +116,15 @@ mod tests {
             yield getServiceHosts()
         }",
             "function*foo(){yield getServiceHosts()}",
+        );
+    }
+
+    #[test]
+    fn issue_1764() {
+        assert_min(
+            "class Hoge {};
+class HogeFuga extends Hoge {};",
+            "class Hoge{};class HogeFuga extends Hoge{};",
         );
     }
 

@@ -1,4 +1,5 @@
 use crate::test_parser;
+use swc_common::BytePos;
 use swc_ecma_ast::*;
 
 fn program(src: &'static str) -> Program {
@@ -67,4 +68,119 @@ fn parse_program_module_error_01() {
         export default a;
         ",
     );
+}
+
+#[test]
+fn issue_1813() {
+    test_parser(
+        "\\u{cccccccccsccccccQcXt[uc(~).const[uctor().const[uctor())tbr())",
+        Default::default(),
+        |p| {
+            p.parse_program().expect_err("should fail");
+
+            Ok(())
+        },
+    )
+}
+
+fn parse_module_export_named_span() {
+    let m = module("export function foo() {}");
+    if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { span, .. })) = &m.body[0] {
+        assert_eq!(span.lo, BytePos(0));
+    } else {
+        panic!("expected ExportDecl");
+    }
+}
+
+#[test]
+fn parse_module_export_default_fn_span() {
+    let m = module("export default function foo() {}");
+    if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+        span, ..
+    })) = &m.body[0]
+    {
+        assert_eq!(span.lo, BytePos(0));
+        assert_eq!(span.hi, BytePos(32));
+    } else {
+        panic!("expected ExportDefaultDecl");
+    }
+}
+
+#[test]
+fn parse_module_export_default_async_fn_span() {
+    let m = module("export default async function foo() {}");
+    if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+        span, ..
+    })) = &m.body[0]
+    {
+        assert_eq!(span.lo, BytePos(0));
+        assert_eq!(span.hi, BytePos(38));
+    } else {
+        panic!("expected ExportDefaultDecl");
+    }
+}
+
+#[test]
+fn parse_module_export_default_class_span() {
+    let m = module("export default class Foo {}");
+    if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+        span, ..
+    })) = &m.body[0]
+    {
+        assert_eq!(span.lo, BytePos(0));
+        assert_eq!(span.hi, BytePos(27));
+    } else {
+        panic!("expected ExportDefaultDecl");
+    }
+}
+
+#[test]
+fn issue_1878() {
+    use super::*;
+    use crate::TsConfig;
+    use swc_common::comments::SingleThreadedComments;
+
+    // file with only comments should have the comments
+    // in the leading map instead of the trailing
+    {
+        let c = SingleThreadedComments::default();
+        let s = "
+            // test
+        ";
+        let _ = super::test_parser_comment(
+            &c,
+            s,
+            Syntax::Typescript(TsConfig {
+                ..Default::default()
+            }),
+            |p| p.parse_typescript_module(),
+        );
+
+        let (leading, trailing) = c.take_all();
+        assert!(trailing.borrow().is_empty());
+        assert_eq!(leading.borrow().len(), 1);
+        assert!(leading.borrow().get(&BytePos(0)).is_some());
+    }
+
+    // file with shebang and comments should still work with the comments trailing
+    // the shebang
+    {
+        let c = SingleThreadedComments::default();
+        let s = "#!/foo/bar
+            // test
+        ";
+        let _ = super::test_parser_comment(
+            &c,
+            s,
+            Syntax::Typescript(TsConfig {
+                ..Default::default()
+            }),
+            |p| p.parse_typescript_module(),
+        );
+
+        let (leading, trailing) = c.take_all();
+        assert!(leading.borrow().is_empty());
+        assert_eq!(trailing.borrow().len(), 1);
+        assert!(trailing.borrow().get(&BytePos(10)).is_some());
+    }
 }

@@ -1,5 +1,6 @@
 # Built files
 /*.js
+!jest.config.js
 /*.map
 /*.d.ts
 native/artifacts.json
@@ -15,6 +16,7 @@ Cargo.lock
 
 .vscode/*
 !.vscode/settings.json
+*.swp
 
 /.idea
 *.iml
@@ -45,3 +47,7 @@ pkg/
 
 yarn.lock
 .idea/
+
+
+# Generated while testing
+*.tmp.js

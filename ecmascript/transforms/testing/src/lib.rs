@@ -3,14 +3,16 @@ use serde::de::DeserializeOwned;
 use std::env;
 use std::fs::read_to_string;
 use std::mem::replace;
+use std::mem::take;
+use std::rc::Rc;
 use std::{
-    fmt,
     fs::{create_dir_all, remove_dir_all, OpenOptions},
     io::{self, Write},
     path::Path,
     process::Command,
     sync::{Arc, RwLock},
 };
+use swc_common::chain;
 use swc_common::DUMMY_SP;
 use swc_common::{
     comments::SingleThreadedComments, errors::Handler, sync::Lrc, FileName, SourceMap,
@@ -21,20 +23,25 @@ use swc_ecma_parser::{error::Error, lexer::Lexer, Parser, StringInput, Syntax};
 use swc_ecma_transforms_base::fixer;
 use swc_ecma_transforms_base::helpers::{inject_helpers, HELPERS};
 use swc_ecma_transforms_base::hygiene;
+use swc_ecma_utils::quote_ident;
+use swc_ecma_utils::quote_str;
 use swc_ecma_utils::DropSpan;
+use swc_ecma_utils::ExprFactory;
 use swc_ecma_utils::HANDLER;
+use swc_ecma_visit::noop_visit_mut_type;
 use swc_ecma_visit::VisitMut;
 use swc_ecma_visit::VisitMutWith;
 use swc_ecma_visit::{as_folder, Fold, FoldWith};
 use tempfile::tempdir_in;
 use testing::assert_eq;
 use testing::find_executable;
+use testing::DebugUsingDisplay;
 use testing::NormalizedOutput;
 
 pub struct Tester<'a> {
     pub cm: Lrc<SourceMap>,
     pub handler: &'a Handler,
-    pub comments: Lrc<SingleThreadedComments>,
+    pub comments: Rc<SingleThreadedComments>,
 }
 
 impl<'a> Tester<'a> {
@@ -166,7 +173,7 @@ impl<'a> Tester<'a> {
         Ok(module)
     }
 
-    pub fn print(&mut self, module: &Module) -> String {
+    pub fn print(&mut self, module: &Module, comments: &Rc<SingleThreadedComments>) -> String {
         let mut wr = Buf(Arc::new(RwLock::new(vec![])));
         {
             let mut emitter = Emitter {
@@ -178,7 +185,7 @@ impl<'a> Tester<'a> {
                     &mut wr,
                     None,
                 )),
-                comments: None,
+                comments: Some(comments),
             };
 
             // println!("Emitting: {:?}", module);
@@ -191,16 +198,68 @@ impl<'a> Tester<'a> {
     }
 }
 
+struct RegeneratorHandler;
+
+impl VisitMut for RegeneratorHandler {
+    noop_visit_mut_type!();
+
+    fn visit_mut_module_item(&mut self, item: &mut ModuleItem) {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                if &*import.src.value != "regenerator-runtime" {
+                    return;
+                }
+
+                let s = import.specifiers.iter().find_map(|v| match v {
+                    ImportSpecifier::Default(rt) => Some(rt.local.clone()),
+                    _ => None,
+                });
+
+                let s = match s {
+                    Some(v) => v,
+                    _ => return,
+                };
+
+                let init = Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: quote_ident!("require").as_callee(),
+                    args: vec![quote_str!("regenerator-runtime").as_arg()],
+                    type_args: Default::default(),
+                }));
+
+                let decl = VarDeclarator {
+                    span: DUMMY_SP,
+                    name: Pat::Ident(s.into()),
+                    init: Some(init),
+                    definite: Default::default(),
+                };
+                *item = ModuleItem::Stmt(Stmt::Decl(Decl::Var(VarDecl {
+                    span: import.span,
+                    kind: VarDeclKind::Var,
+                    declare: false,
+                    decls: vec![decl],
+                })))
+            }
+            _ => {}
+        }
+    }
+}
+
 fn make_tr<F, P>(_: &'static str, op: F, tester: &mut Tester<'_>) -> impl Fold
 where
     F: FnOnce(&mut Tester<'_>) -> P,
     P: Fold,
 {
-    op(tester)
+    chain!(op(tester), as_folder(RegeneratorHandler))
 }
 
-pub fn test_transform<F, P>(syntax: Syntax, tr: F, input: &str, expected: &str, ok_if_code_eq: bool)
-where
+pub fn test_transform<F, P>(
+    syntax: Syntax,
+    tr: F,
+    input: &str,
+    expected: &str,
+    _always_ok_if_code_eq: bool,
+) where
     F: FnOnce(&mut Tester) -> P,
     P: Fold,
 {
@@ -214,6 +273,8 @@ where
             expected,
         )?;
 
+        let expected_comments = take(&mut tester.comments);
+
         println!("----- Actual -----");
 
         let tr = make_tr("actual", tr, tester);
@@ -221,7 +282,10 @@ where
 
         match ::std::env::var("PRINT_HYGIENE") {
             Ok(ref s) if s == "1" => {
-                let hygiene_src = tester.print(&actual.clone().fold_with(&mut HygieneVisualizer));
+                let hygiene_src = tester.print(
+                    &actual.clone().fold_with(&mut HygieneVisualizer),
+                    &tester.comments.clone(),
+                );
                 println!("----- Hygiene -----\n{}", hygiene_src);
             }
             _ => {}
@@ -229,25 +293,30 @@ where
 
         let actual = actual
             .fold_with(&mut hygiene::hygiene())
-            .fold_with(&mut fixer::fixer(None))
-            .fold_with(&mut as_folder(DropSpan {
-                preserve_ctxt: false,
-            }));
+            .fold_with(&mut fixer::fixer(Some(&tester.comments)));
 
-        if actual == expected {
-            return Ok(());
-        }
+        println!("{:?}", tester.comments);
+        println!("{:?}", expected_comments);
 
-        let (actual_src, expected_src) = (tester.print(&actual), tester.print(&expected));
+        {
+            let (actual_leading, actual_trailing) = tester.comments.borrow_all();
+            let (expected_leading, expected_trailing) = expected_comments.borrow_all();
 
-        if actual_src == expected_src {
-            if ok_if_code_eq {
+            if actual == expected
+                && *actual_leading == *expected_leading
+                && *actual_trailing == *expected_trailing
+            {
                 return Ok(());
             }
-            // Diff it
-            println!(">>>>> Code <<<<<\n{}", actual_src);
-            assert_eq!(actual, expected, "different ast was detected");
-            return Err(());
+        }
+
+        let (actual_src, expected_src) = (
+            tester.print(&actual, &tester.comments.clone()),
+            tester.print(&expected, &expected_comments),
+        );
+
+        if actual_src == expected_src {
+            return Ok(());
         }
 
         println!(">>>>> Orig <<<<<\n{}", input);
@@ -262,14 +331,6 @@ where
 
         Err(())
     });
-}
-
-#[derive(PartialEq, Eq)]
-pub struct DebugUsingDisplay<'a>(pub &'a str);
-impl<'a> fmt::Debug for DebugUsingDisplay<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self.0, f)
-    }
 }
 
 /// Test transformation.
@@ -319,7 +380,10 @@ where
         )?;
         match ::std::env::var("PRINT_HYGIENE") {
             Ok(ref s) if s == "1" => {
-                let hygiene_src = tester.print(&module.clone().fold_with(&mut HygieneVisualizer));
+                let hygiene_src = tester.print(
+                    &module.clone().fold_with(&mut HygieneVisualizer),
+                    &tester.comments.clone(),
+                );
                 println!("----- Hygiene -----\n{}", hygiene_src);
             }
             _ => {}
@@ -327,12 +391,12 @@ where
 
         let mut module = module
             .fold_with(&mut hygiene::hygiene())
-            .fold_with(&mut fixer::fixer(None));
+            .fold_with(&mut fixer::fixer(Some(&tester.comments)));
 
-        let src_without_helpers = tester.print(&module);
+        let src_without_helpers = tester.print(&module, &tester.comments.clone());
         module = module.fold_with(&mut inject_helpers());
 
-        let src = tester.print(&module);
+        let src = tester.print(&module, &tester.comments.clone());
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("testing")
@@ -370,6 +434,11 @@ where
         } else {
             Command::new(&jest_path)
         };
+
+        // I hate windows.
+        if cfg!(target_os = "windows") && env::var("CI").is_ok() {
+            base_cmd.arg("--passWithNoTests");
+        }
 
         let status = base_cmd
             .args(&["--testMatch", &format!("{}", path.display())])
@@ -503,7 +572,7 @@ where
             &expected,
         )?;
 
-        let expected_src = tester.print(&expected);
+        let expected_src = tester.print(&expected, &tester.comments.clone());
 
         println!(
             "----- {} -----\n{}",
@@ -518,7 +587,10 @@ where
 
         match ::std::env::var("PRINT_HYGIENE") {
             Ok(ref s) if s == "1" => {
-                let hygiene_src = tester.print(&actual.clone().fold_with(&mut HygieneVisualizer));
+                let hygiene_src = tester.print(
+                    &actual.clone().fold_with(&mut HygieneVisualizer),
+                    &tester.comments.clone(),
+                );
                 println!(
                     "----- {} -----\n{}",
                     Color::Green.paint("Hygiene"),
@@ -530,12 +602,12 @@ where
 
         let actual = actual
             .fold_with(&mut crate::hygiene::hygiene())
-            .fold_with(&mut crate::fixer::fixer(None))
+            .fold_with(&mut crate::fixer::fixer(Some(&tester.comments)))
             .fold_with(&mut as_folder(DropSpan {
                 preserve_ctxt: false,
             }));
 
-        let actual_src = tester.print(&actual);
+        let actual_src = tester.print(&actual, &tester.comments.clone());
 
         Ok((actual_src, expected_src))
     });

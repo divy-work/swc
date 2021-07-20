@@ -6,6 +6,7 @@ use swc_atoms::{js_word, JsWord};
 use swc_common::{util::move_map::MoveMap, Span, Spanned, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::ext::MapWithMut;
+use swc_ecma_utils::member_expr;
 use swc_ecma_utils::private_ident;
 use swc_ecma_utils::quote_ident;
 use swc_ecma_utils::var::VarCollector;
@@ -57,9 +58,17 @@ pub struct Config {
     /// get this backward-compatible output.
     #[serde(default)]
     pub use_define_for_class_fields: bool,
+
+    /// Don't create `export {}`.
+    /// By default, strip creates `export {}` for modules to preserve module
+    /// context.
+    ///
+    /// https://github.com/swc-project/swc/issues/1698
+    #[serde(default)]
+    pub no_empty_export: bool,
 }
 
-pub fn strip_with_config(config: Config) -> impl Fold {
+pub fn strip_with_config(config: Config) -> impl Fold + VisitMut {
     as_folder(Strip {
         config,
         ..Default::default()
@@ -76,6 +85,7 @@ struct Strip {
     config: Config,
     non_top_level: bool,
     scope: Scope,
+
     is_side_effect_import: bool,
     is_type_only_export: bool,
     uninitialized_vars: Vec<VarDeclarator>,
@@ -223,7 +233,7 @@ impl Strip {
                                         accessibility: param_prop.accessibility.clone(),
                                         is_abstract: false,
                                         is_optional: false,
-                                        is_override: false,
+                                        is_override: param_prop.is_override,
                                         readonly: param_prop.readonly,
                                         declare: false,
                                         definite: false,
@@ -573,7 +583,7 @@ impl Strip {
             e: &TsEnumDecl,
             span: Span,
             values: &mut EnumValues,
-            default: Option<i32>,
+            default: Option<i64>,
             init: Option<&Expr>,
         ) -> Result<TsLit, ()> {
             fn compute_bin(
@@ -737,7 +747,7 @@ impl Strip {
                 .map(|val| {
                     match val {
                         TsLit::Number(n) => {
-                            default = n.value as i32 + 1;
+                            default = n.value as i64 + 1;
                         }
                         _ => {}
                     }
@@ -1132,6 +1142,17 @@ impl Visit for Strip {
         n.value.visit_with(n, self);
     }
 
+    fn visit_prop_name(&mut self, n: &PropName, _: &dyn Node) {
+        match n {
+            PropName::Computed(e) => e.visit_with(n, self),
+            _ => {}
+        }
+    }
+
+    fn visit_assign_prop(&mut self, n: &AssignProp, _: &dyn Node) {
+        n.value.visit_with(n, self);
+    }
+
     fn visit_ident(&mut self, n: &Ident, _: &dyn Node) {
         let is_type_only_export = self.is_type_only_export;
         let entry = self
@@ -1250,9 +1271,11 @@ impl VisitMut for Strip {
     fn visit_mut_block_stmt_or_expr(&mut self, n: &mut BlockStmtOrExpr) {
         match n {
             BlockStmtOrExpr::Expr(expr) if expr.is_class() => {
+                let span = expr.span();
+
                 let ClassExpr { ident, class } = expr.take().class().unwrap();
                 let ident = ident.unwrap_or_else(|| private_ident!("_class"));
-                let (decl, extra_exprs) = self.fold_class_as_decl(ident, class);
+                let (decl, extra_exprs) = self.fold_class_as_decl(ident.clone(), class);
                 let mut stmts = vec![];
                 stmts.push(Stmt::Decl(decl));
                 stmts.extend(
@@ -1261,6 +1284,10 @@ impl VisitMut for Strip {
                         .map(|e| e.into_stmt())
                         .collect::<Vec<_>>(),
                 );
+                stmts.push(Stmt::Return(ReturnStmt {
+                    span,
+                    arg: Some(Box::new(Expr::Ident(ident))),
+                }));
                 *n = BlockStmtOrExpr::BlockStmt(BlockStmt {
                     span: n.span(),
                     stmts,
@@ -1566,10 +1593,60 @@ impl VisitMut for Strip {
     }
 
     fn visit_mut_module(&mut self, module: &mut Module) {
+        let was_module = module.body.iter().any(|item| match item {
+            ModuleItem::ModuleDecl(..) => true,
+            _ => false,
+        });
+
         module.visit_mut_children_with(self);
         if !self.uninitialized_vars.is_empty() {
             prepend(
                 &mut module.body,
+                Stmt::Decl(Decl::Var(VarDecl {
+                    span: DUMMY_SP,
+                    kind: VarDeclKind::Var,
+                    decls: take(&mut self.uninitialized_vars),
+                    declare: false,
+                }))
+                .into(),
+            );
+        }
+
+        let is_module = module.body.iter().any(|item| match item {
+            ModuleItem::ModuleDecl(..) => true,
+            _ => false,
+        });
+
+        // Create `export {}` to preserve module context, just like tsc.
+        //
+        // See https://github.com/swc-project/swc/issues/1698
+        if was_module
+            && !is_module
+            && !self.config.no_empty_export
+            && module.body.iter().all(|item| match item {
+                ModuleItem::ModuleDecl(_) => false,
+                ModuleItem::Stmt(_) => true,
+            })
+        {
+            module
+                .body
+                .push(ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(
+                    NamedExport {
+                        span: module.span,
+                        specifiers: vec![],
+                        src: None,
+                        type_only: false,
+                        asserts: None,
+                    },
+                )))
+        }
+    }
+
+    fn visit_mut_script(&mut self, n: &mut Script) {
+        n.visit_mut_children_with(self);
+        if !self.uninitialized_vars.is_empty() {
+            prepend(
+                &mut n.body,
                 Stmt::Decl(Decl::Var(VarDecl {
                     span: DUMMY_SP,
                     kind: VarDeclKind::Var,
@@ -1671,6 +1748,7 @@ impl VisitMut for Strip {
                     span,
                     declare: false,
                     is_export: false,
+                    is_type_only: false,
                     id,
                     module_ref:
                         TsModuleRef::TsExternalModuleRef(TsExternalModuleRef { span: _, expr }),
@@ -1791,13 +1869,17 @@ impl VisitMut for Strip {
                 }
 
                 ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
-                    let mut item = ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
-                        span: export.span(),
-                        expr: export.expr,
-                    });
-                    item.visit_mut_with(self);
-                    stmts.push(ModuleItem::ModuleDecl(item))
+                    stmts.push(ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+                        span: export.span,
+                        expr: Box::new(Expr::Assign(AssignExpr {
+                            span: export.span,
+                            left: PatOrExpr::Expr(member_expr!(DUMMY_SP, module.exports)),
+                            op: op!("="),
+                            right: export.expr,
+                        })),
+                    })));
                 }
+
                 ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(mut export)) => {
                     // if specifier become empty, we remove export statement.
 

@@ -103,6 +103,13 @@ pub(super) struct SourceMapFiles {
     stable_id_to_source_file: HashMap<StableSourceFileId, Lrc<SourceFile>>,
 }
 
+/// The interner for spans.
+///
+/// As most spans are simply stored, we store them as interend form.
+///
+///  - Each ast node only stores pointer to actual data ([BytePos]).
+///  - The pointers ([BytePos]) can be converted to file name, line and column
+///    using this struct.
 pub struct SourceMap {
     pub(super) files: Lock<SourceMapFiles>,
     start_pos: AtomicUsize,
@@ -507,9 +514,9 @@ impl SourceMap {
     /// arguments: a string slice containing the source, an index in
     /// the slice for the beginning of the span and an index in the slice for
     /// the end of the span.
-    fn span_to_source<F>(&self, sp: Span, extract_source: F) -> Result<String, SpanSnippetError>
+    fn span_to_source<F, Ret>(&self, sp: Span, extract_source: F) -> Result<Ret, SpanSnippetError>
     where
-        F: Fn(&str, usize, usize) -> String,
+        F: FnOnce(&str, usize, usize) -> Ret,
     {
         if sp.lo() > sp.hi() {
             return Err(SpanSnippetError::IllFormedSpan(sp));
@@ -561,9 +568,30 @@ impl SourceMap {
         }
     }
 
+    /// Calls the given closure with the source snippet before the given `Span`
+    pub fn with_span_to_prev_source<F, Ret>(&self, sp: Span, op: F) -> Result<Ret, SpanSnippetError>
+    where
+        F: FnOnce(&str) -> Ret,
+    {
+        self.span_to_source(sp, |src, start_index, _| op(&src[..start_index]))
+    }
+
     /// Return the source snippet as `String` before the given `Span`
     pub fn span_to_prev_source(&self, sp: Span) -> Result<String, SpanSnippetError> {
-        self.span_to_source(sp, |src, start_index, _| src[..start_index].to_string())
+        self.with_span_to_prev_source(sp, |s| s.to_string())
+    }
+
+    /// Calls the given closure with the source snippet after the given `Span`
+    pub fn with_span_to_next_source<F, Ret>(&self, sp: Span, op: F) -> Result<Ret, SpanSnippetError>
+    where
+        F: FnOnce(&str) -> Ret,
+    {
+        self.span_to_source(sp, |src, _, end_index| op(&src[end_index..]))
+    }
+
+    /// Return the source snippet as `String` after the given `Span`
+    pub fn span_to_next_source(&self, sp: Span) -> Result<String, SpanSnippetError> {
+        self.with_span_to_next_source(sp, |s| s.to_string())
     }
 
     /// Extend the given `Span` to just after the previous occurrence of `c`.
@@ -604,7 +632,16 @@ impl SourceMap {
 
     /// Given a `Span`, try to get a shorter span ending before the first
     /// occurrence of `c` `char`
+    ///
+    ///
+    /// # Notes
+    ///
+    /// This method returns a dummy span for a dummy span.
     pub fn span_until_char(&self, sp: Span, c: char) -> Span {
+        if sp.is_dummy() {
+            return sp;
+        }
+
         match self.span_to_snippet(sp) {
             Ok(snippet) => {
                 let snippet = snippet.split(c).nth(0).unwrap_or("").trim_end();
@@ -620,7 +657,15 @@ impl SourceMap {
 
     /// Given a `Span`, try to get a shorter span ending just after the first
     /// occurrence of `char` `c`.
+    ///
+    /// # Notes
+    ///
+    /// This method returns a dummy span for a dummy span.
     pub fn span_through_char(&self, sp: Span, c: char) -> Span {
+        if sp.is_dummy() {
+            return sp;
+        }
+
         if let Ok(snippet) = self.span_to_snippet(sp) {
             if let Some(offset) = snippet.find(c) {
                 return sp.with_hi(BytePos(sp.lo().0 + (offset + c.len_utf8()) as u32));
@@ -656,21 +701,22 @@ impl SourceMap {
     }
 
     /// Given a `Span`, get a shorter one until `predicate` yields false.
-    pub fn span_take_while<P>(&self, sp: Span, predicate: P) -> Span
+    pub fn span_take_while<P>(&self, sp: Span, mut predicate: P) -> Span
     where
         P: for<'r> FnMut(&'r char) -> bool,
     {
-        if let Ok(snippet) = self.span_to_snippet(sp) {
+        self.span_to_source(sp, |src, start_index, end_index| {
+            let snippet = &src[start_index..end_index];
+
             let offset = snippet
                 .chars()
-                .take_while(predicate)
+                .take_while(&mut predicate)
                 .map(|c| c.len_utf8())
                 .sum::<usize>();
 
             sp.with_hi(BytePos(sp.lo().0 + (offset as u32)))
-        } else {
-            sp
-        }
+        })
+        .unwrap_or(sp)
     }
 
     pub fn def_span(&self, sp: Span) -> Span {
@@ -1028,8 +1074,8 @@ impl SourceMap {
         let mut src_id = 0u32;
 
         if let Some(orig) = orig {
-            for (idx, src) in orig.sources().enumerate() {
-                builder.set_source(idx as _, src);
+            for src in orig.sources() {
+                let idx = builder.add_source(src);
                 src_id = idx as u32 + 1;
             }
             for (idx, contents) in orig.source_contents().enumerate() {

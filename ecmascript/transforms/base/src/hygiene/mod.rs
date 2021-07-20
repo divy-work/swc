@@ -190,7 +190,7 @@ pub fn hygiene() -> impl Fold + 'static {
     hygiene_with_config(Default::default())
 }
 
-pub fn hygiene_with_config(config: Config) -> impl Fold + 'static {
+pub fn hygiene_with_config(config: Config) -> impl 'static + Fold + VisitMut {
     chain!(
         as_folder(Hygiene {
             config,
@@ -509,20 +509,6 @@ macro_rules! track_ident_mut {
             f.body.visit_mut_with(self);
         }
 
-        fn visit_mut_setter_prop(&mut self, f: &mut SetterProp) {
-            let old = self.ident_type;
-            self.ident_type = IdentType::Ref;
-            f.key.visit_mut_with(self);
-            self.ident_type = old;
-
-            let old = self.ident_type;
-            self.ident_type = IdentType::Binding;
-            f.param.visit_mut_with(self);
-            self.ident_type = old;
-
-            f.body.visit_mut_with(self);
-        }
-
         // impl<'a> Fold for $T<'a> {
         //     fn fold(&mut self, f: GetterProp) -> GetterProp {
         //         let body = f.body.visit_mut_with(self);
@@ -552,15 +538,6 @@ macro_rules! track_ident_mut {
             self.ident_type = IdentType::Label;
             s.label.visit_mut_with(self);
             self.ident_type = old;
-        }
-
-        fn visit_mut_class_decl(&mut self, n: &mut ClassDecl) {
-            let old = self.ident_type;
-            self.ident_type = IdentType::Binding;
-            n.ident.visit_mut_with(self);
-            self.ident_type = old;
-
-            n.class.visit_mut_with(self);
         }
 
         fn visit_mut_key_value_pat_prop(&mut self, n: &mut KeyValuePatProp) {
@@ -604,6 +581,29 @@ impl<'a> VisitMut for Hygiene<'a> {
     noop_visit_mut_type!();
 
     track_ident_mut!();
+
+    fn visit_mut_class_decl(&mut self, n: &mut ClassDecl) {
+        let old = self.ident_type;
+        self.ident_type = IdentType::Binding;
+        n.ident.visit_mut_with(self);
+        self.ident_type = old;
+
+        n.class.visit_mut_with(self);
+    }
+
+    fn visit_mut_setter_prop(&mut self, f: &mut SetterProp) {
+        let old = self.ident_type;
+        self.ident_type = IdentType::Ref;
+        f.key.visit_mut_with(self);
+        self.ident_type = old;
+
+        let old = self.ident_type;
+        self.ident_type = IdentType::Binding;
+        f.param.visit_mut_with(self);
+        self.ident_type = old;
+
+        f.body.visit_mut_with(self);
+    }
 
     fn visit_mut_arrow_expr(&mut self, node: &mut ArrowExpr) {
         let mut folder = Hygiene {

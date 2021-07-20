@@ -1,11 +1,15 @@
-use crate::config::{GlobalPassOption, JscTarget, ModuleConfig};
+use crate::config::{CompiledPaths, GlobalPassOption, JscTarget, ModuleConfig};
 use compat::es2020::export_namespace_from;
 use either::Either;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::{collections::HashMap, sync::Arc};
 use swc_atoms::JsWord;
+use swc_common::FileName;
 use swc_common::{chain, comments::Comments, errors::Handler, Mark, SourceMap};
 use swc_ecma_parser::Syntax;
 use swc_ecma_transforms::hygiene::hygiene_with_config;
+use swc_ecma_transforms::modules::util::Scope;
 use swc_ecma_transforms::{
     compat, fixer, helpers, hygiene, modules, optimization::const_modules, pass::Optional,
     proposals::import_assertions, typescript,
@@ -125,6 +129,9 @@ impl<'a, 'b, P: swc_ecma_visit::Fold> PassBuilder<'a, 'b, P> {
     ///  - fixer if enabled
     pub fn finalize<'cmt>(
         self,
+        base_url: String,
+        paths: CompiledPaths,
+        base: &FileName,
         syntax: Syntax,
         module: Option<ModuleConfig>,
         comments: Option<&'cmt dyn Comments>,
@@ -144,11 +151,12 @@ impl<'a, 'b, P: swc_ecma_visit::Fold> PassBuilder<'a, 'b, P> {
             Either::Left(chain!(
                 import_assertions(),
                 Optional::new(typescript::strip(), syntax.typescript()),
-                swc_ecma_preset_env::preset_env(self.global_mark, env)
+                swc_ecma_preset_env::preset_env(self.global_mark, comments, env)
             ))
         } else {
             Either::Right(chain!(
                 import_assertions(),
+                Optional::new(compat::es2021::es2021(), self.target < JscTarget::Es2021),
                 Optional::new(compat::es2020::es2020(), self.target < JscTarget::Es2020),
                 Optional::new(typescript::strip(), syntax.typescript()),
                 Optional::new(compat::es2018(), self.target <= JscTarget::Es2018),
@@ -157,6 +165,7 @@ impl<'a, 'b, P: swc_ecma_visit::Fold> PassBuilder<'a, 'b, P> {
                 Optional::new(
                     compat::es2015(
                         self.global_mark,
+                        comments,
                         compat::es2015::Config {
                             for_of: compat::es2015::for_of::Config {
                                 assume_array: self.loose
@@ -176,18 +185,27 @@ impl<'a, 'b, P: swc_ecma_visit::Fold> PassBuilder<'a, 'b, P> {
             ))
         };
 
+        let module_scope = Rc::new(RefCell::new(Scope::default()));
         chain!(
             self.pass,
             compat_pass,
-            compat::reserved_words::reserved_words(),
-            Optional::new(export_namespace_from(), need_interop_analysis),
             // module / helper
             Optional::new(
-                modules::import_analysis::import_analyzer(),
+                modules::import_analysis::import_analyzer(Rc::clone(&module_scope)),
                 need_interop_analysis
             ),
+            compat::reserved_words::reserved_words(),
+            Optional::new(export_namespace_from(), need_interop_analysis),
             Optional::new(helpers::inject_helpers(), self.inject_helpers),
-            ModuleConfig::build(self.cm.clone(), self.global_mark, module),
+            ModuleConfig::build(
+                self.cm.clone(),
+                base_url,
+                paths,
+                base,
+                self.global_mark,
+                module,
+                Rc::clone(&module_scope)
+            ),
             Optional::new(
                 hygiene_with_config(self.hygiene.clone().unwrap_or_default()),
                 self.hygiene.is_some()

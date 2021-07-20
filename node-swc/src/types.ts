@@ -175,6 +175,12 @@ export interface Options extends Config {
   plugin?: Plugin;
 
   isModule?: boolean;
+
+  /**
+   * Destination path. Note that this value is used only to fix source path
+   * of source map files and swc does not write output to this path.
+   */
+  outputPath?: string
 }
 
 export interface CallerOptions {
@@ -204,17 +210,15 @@ export interface Config {
   /**
    * - true to generate a sourcemap for the code and include it in the result object.
    * - "inline" to generate a sourcemap and append it as a data URL to the end of the code, but not include it in the result object.
-   * - "both" is the same as inline, but will include the map in the result object.
    *
    * `swc-cli` overloads some of these to also affect how maps are written to disk:
    *
    * - true will write the map to a .map file on disk
    * - "inline" will write the file directly, so it will have a data: containing the map
-   * - "both" will write the file with a data: URL and also a .map.
    * - Note: These options are bit weird, so it may make the most sense to just use true
    *  and handle the rest in your own code, depending on your use case.
    */
-  sourceMaps?: boolean | "inline" | "both";
+  sourceMaps?: boolean | "inline";
 }
 
 /**
@@ -272,6 +276,15 @@ export interface JscConfig {
    * Defaults to `es3` (which enableds **all** pass).
    */
   target?: JscTarget;
+
+  /**
+   * Keep class names.
+   */
+  keepClassNames?: boolean
+
+  paths?: {
+    [from: string]: [string]
+  }
 }
 
 export type JscTarget =
@@ -282,7 +295,8 @@ export type JscTarget =
   | "es2017"
   | "es2018"
   | "es2019"
-  | "es2020";
+  | "es2020"
+  | "es2021";
 
 export type ParserConfig = TsParserConfig | EsParserConfig;
 export interface TsParserConfig {
@@ -396,13 +410,13 @@ export interface ReactConfig {
    *
    * Defaults to `React.createElement`.
    */
-  pragma: String;
+  pragma: string;
   /**
    * Replace the component used when compiling JSX fragments.
    *
    * Defaults to `React.Fragment`
    */
-  pragmaFrag: String;
+  pragmaFrag: string;
   /**
    * Toggles whether or not to throw an error if a XML namespaced tag name is used. For example:
    * `<f:image />`
@@ -424,6 +438,21 @@ export interface ReactConfig {
    * Use `Object.assign()` instead of `_extends`. Defaults to false.
    */
   useBuiltins: boolean;
+
+  /**
+   * Enable fast refresh feature for React app
+   */
+  refresh: boolean;
+
+  /**
+   * jsx runtime
+   */
+  runtime: 'automatic' | 'classic'
+
+  /**
+   * Declares the module specifier to be used for importing the `jsx` and `jsxs` factory functions when using `runtime` 'automatic'
+   */
+  importSource: string
 }
 /**
  *  - `import { DEBUG } from '@ember/env-flags';`
@@ -705,7 +734,7 @@ export type Declaration =
 export interface FunctionDeclaration extends Fn {
   type: "FunctionDeclaration";
 
-  ident: Identifier;
+  identifier: Identifier;
 
   declare: boolean;
 }
@@ -772,6 +801,7 @@ export type Expression =
   | JSXElement
   | JSXFragment
   | TsTypeAssertion
+  | TsConstAssertion
   | TsNonNullExpression
   | TsAsExpression
   | PrivateName
@@ -795,7 +825,12 @@ export interface ThisExpression extends ExpressionBase {
 export interface ArrayExpression extends ExpressionBase {
   type: "ArrayExpression";
 
-  elements: (Expression | SpreadElement | undefined)[];
+  elements: (ExprOrSpread | undefined)[];
+}
+
+export interface ExprOrSpread {
+  spread?: Span,
+  expression: Expression
 }
 
 export interface ObjectExpression extends ExpressionBase {
@@ -1069,7 +1104,7 @@ export interface JSXOpeningElement extends Node, HasSpan {
 
   name: JSXElementName;
 
-  attrs?: JSXAttributeOrSpread[];
+  attributes?: JSXAttributeOrSpread[];
 
   selfClosing: boolean;
 
@@ -1399,7 +1434,7 @@ export interface ArrayPattern extends Node, HasSpan, PatternBase {
 export interface ObjectPattern extends Node, HasSpan, PatternBase {
   type: "ObjectPattern";
 
-  props: ObjectPatternProperty[];
+  properties: ObjectPatternProperty[];
 }
 
 export interface AssignmentPattern extends Node, HasSpan, PatternBase {
@@ -2016,7 +2051,7 @@ export interface TsEnumDeclaration extends Node, HasSpan {
   declare: boolean;
   is_const: boolean;
   id: Identifier;
-  member: TsEnumMember[];
+  members: TsEnumMember[];
 }
 
 export interface TsEnumMember extends Node, HasSpan {
@@ -2100,6 +2135,12 @@ export interface TsTypeAssertion extends ExpressionBase {
 
   expression: Expression;
   typeAnnotation: TsType;
+}
+
+export interface TsConstAssertion extends ExpressionBase {
+  type: "TsConstAssertion";
+
+  expression: Expression;
 }
 
 export interface TsNonNullExpression extends ExpressionBase {

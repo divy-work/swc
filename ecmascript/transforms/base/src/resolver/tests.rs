@@ -164,22 +164,6 @@ fn test_mark_for() {
 }
 
 to!(
-    basic_no_usage,
-    "
-        let foo;
-        {
-            let foo;
-        }
-        ",
-    "
-        let foo;
-        {
-            let foo1;
-        }
-        "
-);
-
-to!(
     class_nested_var,
     "
         var ConstructorScoping = function ConstructorScoping() {
@@ -1279,73 +1263,6 @@ identical_ts!(
     "
 );
 
-identical_ts!(
-    ts_resolver_003,
-    "
-    class Foo<T> {}
-    class A {}
-    class B {}
-    new Foo<A>();
-    new Foo<B>();
-    "
-);
-
-to_ts!(
-    ts_resolver_class_constructor,
-    "
-class G<T> {}
-class Foo {
-    constructor() {
-        class Foo {
-            
-        }
-
-        new G<Foo__2>();
-    }
-}
-new G<Foo>();
-",
-    "
-class G<T> {
-}
-class Foo {
-    constructor(){
-        class Foo__2 {
-        }
-        new G<Foo__2>();
-    }
-}
-new G<Foo>();
-        "
-);
-
-to_ts!(
-    ts_resolver_class_getter,
-    "
-class G<T> {}
-class Foo {
-    get foo() {
-        class Foo {
-            
-        }
-
-        new G<Foo>();
-    }
-}
-",
-    "
-class G<T> {
-}
-class Foo {
-    get foo() {
-        class Foo__2 {
-        }
-        new G<Foo__2>();
-    }
-}
-    "
-);
-
 to_ts!(
     ts_resolver_nested_interface,
     "
@@ -1937,7 +1854,7 @@ to_ts!(
     "
     module Top {
         module A__2 {
-            export function b__0() {
+            export function b__3() {
             }
         }
         A__2.b();
@@ -1989,9 +1906,9 @@ to_ts!(
         interface B__2 {
             m__0: string;
         }
-        var x: any;
-        var y = x as A__2<B__2>[];
-        var z = y[0].m;
+        var x__2: any;
+        var y__2 = x__2 as A__2<B__2>[];
+        var z__2 = y__2[0].m;
     }
     
     "
@@ -2149,84 +2066,6 @@ to_ts!(
         x__2 = y__2;
         return y__2;
     };
-    "
-);
-
-to_ts!(
-    generic_call_type_argument_inference,
-    "
-    class C<T, U> {
-        constructor(public t: T, public u: U) {
-        }
-    
-        foo(t: T, u: U) {
-            return t;
-        }
-    
-        foo2(t: T, u: U) {
-            return u;
-        }
-    
-        foo3<T>(t: T, u: U) {
-            return t;
-        }
-    
-        foo4<U>(t: T, u: U) {
-            return t;
-        }
-    
-        foo5<T,U>(t: T, u: U) {
-            return t;
-        }
-    
-        foo6<T, U>() {
-            var x: T;
-            return x;
-        }
-    
-        foo7<T, U>(u: U) {
-            var x: T;
-            return x;
-        }
-    
-        foo8<T, U>() {
-            var x: T;
-            return x;
-        }
-    }    
-    ",
-    "
-    class C<T, U> {
-        constructor(public t__2: T, public u__2: U){
-        }
-        foo(t__3: T, u__3: U) {
-            return t__3;
-        }
-        foo2(t__4: T, u__4: U) {
-            return u__4;
-        }
-        foo3<T__5>(t__5: T__5, u__5: U) {
-            return t__5;
-        }
-        foo4<U__6>(t__6: T, u__6: U__6) {
-            return t__6;
-        }
-        foo5<T__7, U__7>(t__7: T__7, u__7: U__7) {
-            return t__7;
-        }
-        foo6<T__8, U__8>() {
-            var x__8: T__8;
-            return x__8;
-        }
-        foo7<T__9, U__9>(u__9: U__9) {
-            var x__9: T__9;
-            return x__9;
-        }
-        foo8<T__10, U__10>() {
-            var x__10: T__10;
-            return x__10;
-        }
-    }
     "
 );
 
@@ -2468,24 +2307,41 @@ to_ts!(
         get [`hello ${a} bye`]() { return 0; }
     }
     ",
-    "
+    r#"
     var s: string;
     var n: number;
     var a: any;
     var v = {
-        get [s]() { return 0; },
-        set [n](v__2) { },
-        get [s + s]() { return 0; },
-        set [s + n](v__2) { },
-        get [+s]() { return 0; },
-        set [\"\"](v__2) { },
-        get [0]() { return 0; },
-        set [a](v__2) { },
-        get [<any>true]() { return 0; },
-        set [`hello bye`](v__2) { },
-        get [`hello ${a} bye`]() { return 0; }
-    }
-    "
+        get [s] () {
+            return 0;
+        },
+        set [n] (v__2){
+        },
+        get [s + s] () {
+            return 0;
+        },
+        set [s + n] (v__3){
+        },
+        get [+s] () {
+            return 0;
+        },
+        set [""] (v__4){
+        },
+        get [0] () {
+            return 0;
+        },
+        set [a] (v__5){
+        },
+        get [<any>true] () {
+            return 0;
+        },
+        set [`hello bye`] (v__6){
+        },
+        get [`hello ${a} bye`] () {
+            return 0;
+        }
+    };
+    "#
 );
 
 to!(
@@ -2673,4 +2529,364 @@ to!(
         return g;
     }
     "#
+);
+
+to_ts!(
+    ts_resolver_type_aliases_do_not_merge,
+    r#"
+    export type A = {}
+    type A = {}
+    "#,
+    r#"
+    export type A = {}
+    type A = {}
+    "#
+);
+
+to_ts!(
+    ts_simple,
+    "
+    let a;
+    {
+        let a;
+        let b;
+        {
+            let a;
+            let b;
+            let c;
+        }
+        {
+            let a;
+            let b;
+            let c;
+        }
+    }
+    ",
+    "
+    let a;
+    {
+        let a__2;
+        let b__2;
+        {
+            let a__3;
+            let b__3;
+            let c__3;
+        }
+        {
+            let a__4;
+            let b__4;
+            let c__4;
+        }
+    }
+    "
+);
+
+to!(
+    ts_es5_for_of_27,
+    "
+    for (var {x: a = 0, y: b = 1} of [2, 3]) {
+        a;
+        b;
+    }
+    ",
+    "
+    for (var {x: a = 0, y: b = 1} of [2, 3]) {
+        a;
+        b;
+    }
+    "
+);
+
+to_ts!(
+    ts_if_do_while_statements_01,
+    "
+    module M {
+        export class A {
+            name: string;
+        }
+    
+        export function F2(x: number): string { return x.toString(); }
+    }
+    
+    module N {
+        export class A {
+            id: number;
+        }
+    
+        export function F2(x: number): string { return x.toString(); }
+    }
+    ",
+    "
+    module M {
+        export class A__2 {
+            name__0: string;
+        }
+        export function F2__2(x__3: number): string {
+            return x__3.toString();
+        }
+    }
+    module N {
+        export class A__4 {
+            id__0: number;
+        }
+        export function F2__4(x__5: number): string {
+            return x__5.toString();
+        }
+    }
+    "
+);
+
+to_ts!(
+    ts_type_parameter_used_as_type_parameter_contraint_01,
+    "
+    var f3 = <T, U extends T>(x: T, y: U) => {
+        function bar<V extends T, W extends U>() {
+            var g = <X extends W, Y extends V>(a: X, b: Y): T => {
+                x = y;
+                return y;
+            }
+        }
+    }
+
+    var f4 = <U extends T, T>(x: T, y: U) => {
+        function bar<V extends T, W extends U>() {
+            var g = <X extends W, Y extends V>(a: X, b: Y): T => {
+                x = y;
+                return y;
+            }
+        }
+    }
+    ",
+    "
+    var f3 = <T__2, U__2 extends T__2>(x__2: T__2, y__2: U__2)=>{
+        function bar__2<V__3 extends T__2, W__3 extends U__2>() {
+            var g__3 = <X__4 extends W__3, Y__4 extends V__3>(a__4: X__4, b__4: Y__4)=>{
+                x__2 = y__2;
+                return y__2;
+            };
+        }
+    };
+    var f4 = <U__5 extends T__5, T__5>(x__5: T__5, y__5: U__5)=>{
+        function bar__5<V__6 extends T__5, W__6 extends U__5>() {
+            var g__6 = <X__7 extends W__6, Y__7 extends V__6>(a__7: X__7, b__7: Y__7)=>{
+                x__5 = y__5;
+                return y__5;
+            };
+        }
+    };
+    "
+);
+
+to_ts!(
+    issue_1653_1,
+    "
+    namespace X
+    {
+        export namespace Z
+        {
+            export const foo = 0
+        }
+    }
+
+    namespace Y
+    {
+        export namespace Z
+        {
+            export const bar = 1
+        }
+    }
+
+    ",
+    "
+    module X {
+        export module Z__2 {
+            export const foo__3 = 0;
+        }
+    }
+    module Y {
+        export module Z__4 {
+            export const bar__5 = 1;
+        }
+    }
+    "
+);
+
+#[test]
+fn issue_1653_2() {
+    run_test(
+        ts(),
+        || {
+            let top_level_mark = Mark::fresh(Mark::root());
+
+            chain!(
+                resolver_with_mark(top_level_mark),
+                as_folder(TsHygiene { top_level_mark })
+            )
+        },
+        "
+            namespace X
+            {
+                export namespace Z
+                {
+                    export const foo = 0
+                }
+            }
+
+            namespace Y
+            {
+                export namespace Z
+                {
+                    export const bar = 1
+                }
+            }
+            ",
+        "
+            module X {
+                export module Z__0 {
+                    export const foo__0 = 0;
+                }
+            }
+            module Y {
+                export module Z__0 {
+                    export const bar__0 = 1;
+                }
+            }
+            ",
+    );
+}
+
+to_ts!(
+    ts_for_of_statements_for_of_23_01,
+    "
+    for (const v of new FooIterator) {
+        const v = 0; // new scope
+    }
+    ",
+    "
+    for (const v__1 of new FooIterator){
+        const v__3 = 0;
+    }
+    "
+);
+
+to_ts!(
+    ts_local_types_4_1,
+    "
+    function f1() {
+        // Type parameters are in scope in parameters and return types
+        function f<T>(x: T): T {
+            return undefined;
+        }
+    }
+    
+    function f2() {
+        // Local types are not in scope in parameters and return types
+        function f(x: T): T {
+            interface T { }
+            return undefined;
+        }
+    }
+    
+    function f3() {
+        // Type parameters and top-level local types are in same declaration space
+        function f<T>() {
+            interface T { }
+            return undefined;
+        }
+    }
+    ",
+    "
+    function f1() {
+        function f__2<T__3>(x__3: T__3): T__3 {
+            return undefined;
+        }
+    }
+    function f2() {
+        function f__4(x__5: T): T {
+            interface T__5 {
+            }
+            return undefined;
+        }
+    }
+    function f3() {
+        function f__6<T__7>() {
+            interface T__7 {
+            }
+            return undefined;
+        }
+    }
+    "
+);
+
+to_ts!(
+    ts_local_types_4_2,
+    "
+    function f2() {
+        // Local types are not in scope in parameters and return types
+        function f(x: T): T {
+            interface T { }
+            return undefined;
+        }
+    }
+    ",
+    "
+    function f2() {
+        function f__2(x__3: T): T {
+            interface T__3 {
+            }
+            return undefined;
+        }
+    }
+    "
+);
+
+to_ts!(
+    ts_mapped_type_as_clauses_01,
+    "
+    type Lazyify<T> = {
+        [K in keyof T as `get${Capitalize<K & string>}`]: () => T[K]
+    };
+    ",
+    "
+    type Lazyify<T__2> = {
+        [K__2 in keyof T__2]: () => T__2[K__2];
+    };
+    "
+);
+
+to_ts!(
+    ts_async_await_nested_class_es5,
+    "
+    class A {
+        static B = class B {
+            static func2(): Promise<void> {
+                return new Promise((resolve) => { resolve(null); });
+            }
+            static C = class C {
+                static async func() {
+                    await B.func2();
+                }
+            }
+        }
+    }
+    
+    A.B.C.func();
+    ",
+    "
+    class A {
+        static B__0 = class B__2 {
+            static func2(): Promise<void> {
+                return new Promise((resolve__3)=>{
+                    resolve__3(null);
+                });
+            }
+            static C__0 = class C__4 {
+                static async func() {
+                    await B__2.func2();
+                }
+            };
+        };
+    }
+    A.B.C.func();
+    "
 );

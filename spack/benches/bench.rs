@@ -4,21 +4,13 @@
 
 extern crate test;
 
-#[cfg(all(unix, not(target_env = "musl")))]
-#[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-#[cfg(windows)]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use anyhow::Error;
-use spack::resolvers::NodeResolver;
 use std::{
     collections::HashMap,
     hint::black_box,
     path::{Path, PathBuf},
 };
+use swc::resolver::NodeResolver;
 use swc_atoms::js_word;
 use swc_bundler::{Bundler, Load, ModuleData, ModuleRecord};
 use swc_common::{sync::Lrc, FileName, SourceMap, Span, GLOBALS};
@@ -29,10 +21,12 @@ use swc_ecma_visit::FoldWith;
 use test::Bencher;
 
 #[bench]
+#[ignore]
 fn three_js(b: &mut Bencher) {
     let dir = PathBuf::new()
         .join("..")
-        .join("integration-tests")
+        .join("tests")
+        .join("integration")
         .join("three-js")
         .join("repo");
     run_bench(b, &dir.join("src").join("Three.js"));
@@ -46,7 +40,7 @@ fn run_bench(b: &mut Bencher, entry: &Path) {
                     globals,
                     cm.clone(),
                     Loader { cm: cm.clone() },
-                    NodeResolver::new(),
+                    NodeResolver::default(),
                     swc_bundler::Config {
                         ..Default::default()
                     },

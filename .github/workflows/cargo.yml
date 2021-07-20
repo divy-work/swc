@@ -13,6 +13,7 @@ on: [push, pull_request]
 #      - 'trying'
 
 env:
+  CI: 1
   CARGO_INCREMENTAL: 0
   RUST_LOG: "debug"
 
@@ -39,6 +40,8 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    env:
+      RUST_LOG: "0"
     steps:
       - uses: actions/checkout@v2
 
@@ -61,7 +64,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-10.15
-          - windows-2019
+          - windows-latest
     steps:
       - uses: actions/checkout@v2
 
@@ -77,7 +80,8 @@ jobs:
           path: |
             ~/.cargo/
             target
-          key: ${{ runner.os }}-cargo-v3
+            Cargo.lock
+          key: ${{ runner.os }}-cargo-v4
       # Ensure that all components are compilable.
       - name: Run cargo check for all targets
         run: cargo check --color always --all --all-targets
@@ -91,17 +95,21 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-10.15
-          - windows-2019
+          # - macos-10.15
+          - windows-latest
         crate:
           - ast_node
           - enum_kind
           - from_variant
           - jsdoc
+          - node
           - spack
           - string_enum
           - swc
           - swc_atoms
+          - swc_babel_ast
+          - swc_babel_compat
+          - swc_babel_visit
           - swc_bundler
           - swc_common
           - swc_ecma_ast
@@ -110,10 +118,12 @@ jobs:
           - swc_ecma_dep_graph
           - swc_ecma_ext_transforms
           - swc_ecma_loader
+          - swc_ecma_minifier
           - swc_ecma_parser
           - swc_ecma_preset_env
           - swc_ecma_transforms
           - swc_ecma_transforms_base
+          - swc_ecma_transforms_classes
           - swc_ecma_transforms_compat
           - swc_ecma_transforms_macros
           - swc_ecma_transforms_module
@@ -127,12 +137,14 @@ jobs:
           - swc_ecmascript
           - swc_eq_ignore_macros
           - swc_macros_common
+          - swc_node_base
           - swc_visit
           - swc_visit_macros
           - testing
           - testing_macros
+          - wasm
         exclude:
-          - os: windows-2019
+          - os: windows-latest
             crate: spack
 
     steps:
@@ -145,6 +157,11 @@ jobs:
 
       - uses: actions/checkout@v2
 
+      # Source map format
+      - uses: actions/setup-node@v2
+        with:
+          node-version: "14"
+
       # We explicitly do this to cache properly.
       - name: Install Rust
         uses: actions-rs/toolchain@v1
@@ -155,7 +172,7 @@ jobs:
         with:
           node-version: 14
 
-      - uses: denolib/setup-deno@v2
+      - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
 
@@ -194,7 +211,8 @@ jobs:
           path: |
             ~/.cargo/
             target
-          key: ${{ runner.os }}-cargo-v3
+            Cargo.lock
+          key: ${{ runner.os }}-cargo-v4
 
       - name: Run cargo test
         run: |
@@ -231,7 +249,7 @@ jobs:
           branch: gh-pages
           folder: target/doc
           clean: true
-          git-config-email: kdy1997.dev@gmail.com
+          git-config-email: github-bot@swc.rs
           repository-name: swc-project/rustdoc
           commit-message: "Update"
           single-commit: true

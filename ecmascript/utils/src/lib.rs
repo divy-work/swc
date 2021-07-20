@@ -475,11 +475,26 @@ pub trait ExprExt {
             return (Pure, Known(false));
         }
 
-        let val = match *expr {
+        let val = match expr {
             Expr::Paren(ref e) => return e.expr.as_bool(),
             Expr::Assign(AssignExpr { ref right, .. }) => {
                 let (_, v) = right.as_bool();
                 return (MayBeImpure, v);
+            }
+
+            Expr::Unary(UnaryExpr {
+                op: op!(unary, "-"),
+                arg,
+                ..
+            }) => {
+                let v = arg.as_number();
+                match v {
+                    Known(n) => Known(match n.classify() {
+                        FpCategory::Nan | FpCategory::Zero => false,
+                        _ => true,
+                    }),
+                    Unknown => return (MayBeImpure, Unknown),
+                }
             }
 
             Expr::Unary(UnaryExpr {
@@ -490,7 +505,58 @@ pub trait ExprExt {
                 let (p, v) = arg.as_bool();
                 return (p, !v);
             }
-            Expr::Seq(SeqExpr { ref exprs, .. }) => exprs.last().unwrap().as_bool().1,
+            Expr::Seq(SeqExpr { exprs, .. }) => exprs.last().unwrap().as_bool().1,
+
+            Expr::Bin(BinExpr {
+                left,
+                op: op!(bin, "-"),
+                right,
+                ..
+            }) => {
+                let (lp, ln) = left.cast_to_number();
+                let (rp, rn) = right.cast_to_number();
+
+                return (
+                    lp + rp,
+                    match (ln, rn) {
+                        (Known(ln), Known(rn)) => {
+                            if ln == rn {
+                                Known(false)
+                            } else {
+                                Known(true)
+                            }
+                        }
+                        _ => Unknown,
+                    },
+                );
+            }
+
+            Expr::Bin(BinExpr {
+                left,
+                op: op!("/"),
+                right,
+                ..
+            }) => {
+                let lv = left.as_number();
+                let rv = right.as_number();
+
+                match (lv, rv) {
+                    (Known(lv), Known(rv)) => {
+                        // NaN is false
+                        if lv == 0.0 && rv == 0.0 {
+                            return (Pure, Known(false));
+                        }
+                        // Infinity is true.
+                        if rv == 0.0 {
+                            return (Pure, Known(true));
+                        }
+                        let v = lv / rv;
+
+                        return (Pure, Known(v != 0.0));
+                    }
+                    _ => Unknown,
+                }
+            }
 
             Expr::Bin(BinExpr {
                 ref left,
@@ -509,7 +575,7 @@ pub trait ExprExt {
                 let (lp, lv) = left.as_bool();
                 let (rp, rv) = right.as_bool();
 
-                let v = if op == op!("&") {
+                let v = if *op == op!("&") {
                     lv.and(rv)
                 } else {
                     lv.or(rv)
@@ -536,6 +602,48 @@ pub trait ExprExt {
                 let (rp, rv) = right.as_bool();
                 if let Known(true) = rv {
                     return (lp + rp, rv);
+                }
+
+                Unknown
+            }
+
+            Expr::Bin(BinExpr {
+                ref left,
+                op: op!("&&"),
+                ref right,
+                ..
+            }) => {
+                let (lp, lv) = left.as_bool();
+                if let Known(false) = lv {
+                    return (lp, lv);
+                }
+
+                let (rp, rv) = right.as_bool();
+                if let Known(false) = rv {
+                    return (lp + rp, rv);
+                }
+
+                Unknown
+            }
+
+            Expr::Bin(BinExpr {
+                left,
+                op: op!(bin, "+"),
+                right,
+                ..
+            }) => {
+                match &**left {
+                    Expr::Lit(Lit::Str(s)) if !s.value.is_empty() => {
+                        return (MayBeImpure, Known(true))
+                    }
+                    _ => {}
+                }
+
+                match &**right {
+                    Expr::Lit(Lit::Str(s)) if !s.value.is_empty() => {
+                        return (MayBeImpure, Known(true))
+                    }
+                    _ => {}
                 }
 
                 Unknown
@@ -581,25 +689,24 @@ pub trait ExprExt {
         }
     }
 
-    /// Emulates javascript Number() cast function.
-    fn as_number(&self) -> Value<f64> {
+    fn cast_to_number(&self) -> (Purity, Value<f64>) {
         let expr = self.as_expr();
-        let v = match *expr {
-            Expr::Lit(ref l) => match *l {
+        let v = match expr {
+            Expr::Lit(l) => match l {
                 Lit::Bool(Bool { value: true, .. }) => 1.0,
                 Lit::Bool(Bool { value: false, .. }) | Lit::Null(..) => 0.0,
-                Lit::Num(Number { value: n, .. }) => n,
-                Lit::Str(Str { ref value, .. }) => return num_from_str(value),
-                _ => return Unknown,
+                Lit::Num(Number { value: n, .. }) => *n,
+                Lit::Str(Str { value, .. }) => return (Pure, num_from_str(&value)),
+                _ => return (Pure, Unknown),
             },
-            Expr::Ident(Ident { ref sym, .. }) => match *sym {
+            Expr::Ident(Ident { sym, .. }) => match *sym {
                 js_word!("undefined") | js_word!("NaN") => NAN,
                 js_word!("Infinity") => INFINITY,
-                _ => return Unknown,
+                _ => return (Pure, Unknown),
             },
             Expr::Unary(UnaryExpr {
                 op: op!(unary, "-"),
-                ref arg,
+                arg,
                 ..
             }) if match &**arg {
                 Expr::Ident(Ident {
@@ -623,7 +730,7 @@ pub trait ExprExt {
                         1.0
                     }
                 }
-                _ => return Unknown,
+                _ => return (MayBeImpure, Unknown),
             },
             Expr::Unary(UnaryExpr {
                 op: op!("void"),
@@ -631,23 +738,49 @@ pub trait ExprExt {
                 ..
             }) => {
                 if arg.may_have_side_effects() {
-                    return Unknown;
+                    return (MayBeImpure, Known(NAN));
                 } else {
                     NAN
                 }
             }
 
             Expr::Tpl(..) | Expr::Object(ObjectLit { .. }) | Expr::Array(ArrayLit { .. }) => {
-                return num_from_str(&*match self.as_string() {
-                    Known(v) => v,
-                    Unknown => return Value::Unknown,
-                });
+                return (
+                    Pure,
+                    num_from_str(&*match self.as_string() {
+                        Known(v) => v,
+                        Unknown => return (MayBeImpure, Unknown),
+                    }),
+                );
             }
 
-            _ => return Unknown,
+            Expr::Seq(seq) => {
+                if let Some(last) = seq.exprs.last() {
+                    let (_, v) = last.cast_to_number();
+
+                    // TODO: Purity
+                    return (MayBeImpure, v);
+                }
+
+                return (MayBeImpure, Unknown);
+            }
+
+            _ => return (MayBeImpure, Unknown),
         };
 
-        Known(v)
+        (Purity::Pure, Known(v))
+    }
+
+    /// Emulates javascript Number() cast function.
+    ///
+    /// Note: This method returns [Known] only if it's pure.
+    fn as_number(&self) -> Value<f64> {
+        let (purity, v) = self.cast_to_number();
+        if !purity.is_pure() {
+            return Unknown;
+        }
+
+        v
     }
 
     /// Returns Known only if it's pure.
@@ -1012,7 +1145,7 @@ pub trait ExprExt {
             }
             Expr::OptChain(ref e) => e.expr.may_have_side_effects(),
 
-            Expr::Invalid(..) => unreachable!(),
+            Expr::Invalid(..) => true,
         }
     }
 }
@@ -1701,159 +1834,18 @@ impl<'a> UsageFinder<'a> {
     }
 }
 
-// Used for error reporting in transform.
-scoped_thread_local!(pub static HANDLER: Handler);
+scoped_thread_local!(
+    /// Used for error reporting in transform.
+    pub static HANDLER: Handler
+);
 
 /// make a new expression which evaluates `val` preserving side effects, if any.
 pub fn preserve_effects<I>(span: Span, val: Expr, exprs: I) -> Expr
 where
     I: IntoIterator<Item = Box<Expr>>,
 {
-    /// Add side effects of `expr` to `v`
-    /// preserving order and conditions. (think a() ? yield b() : c())
-    #[allow(clippy::vec_box)]
-    fn add_effects(v: &mut Vec<Box<Expr>>, expr: Box<Expr>) {
-        let expr = *expr;
-        match expr {
-            Expr::Lit(..)
-            | Expr::This(..)
-            | Expr::Fn(..)
-            | Expr::Arrow(..)
-            | Expr::Ident(..)
-            | Expr::PrivateName(..) => {}
-
-            // In most case, we can do nothing for this.
-            Expr::Update(_) | Expr::Assign(_) | Expr::Yield(_) | Expr::Await(_) => {
-                v.push(Box::new(expr))
-            }
-
-            // TODO
-            Expr::MetaProp(_) => v.push(Box::new(expr)),
-
-            Expr::Call(_) => v.push(Box::new(expr)),
-            Expr::New(e) => {
-                // Known constructors
-                match *e.callee {
-                    Expr::Ident(Ident { ref sym, .. }) => {
-                        if *sym == js_word!("Date") && e.args.is_empty() {
-                            return;
-                        }
-                    }
-                    _ => {}
-                }
-
-                v.push(Box::new(Expr::New(e)))
-            }
-            Expr::Member(_) => v.push(Box::new(expr)),
-
-            // We are at here because we could not determine value of test.
-            //TODO: Drop values if it does not have side effects.
-            Expr::Cond(_) => v.push(Box::new(expr)),
-
-            Expr::Unary(UnaryExpr { arg, .. }) => add_effects(v, arg),
-            Expr::Bin(BinExpr { left, right, .. }) => {
-                add_effects(v, left);
-                add_effects(v, right);
-            }
-            Expr::Seq(SeqExpr { exprs, .. }) => exprs.into_iter().for_each(|e| add_effects(v, e)),
-
-            Expr::Paren(e) => add_effects(v, e.expr),
-
-            Expr::Object(ObjectLit {
-                span, mut props, ..
-            }) => {
-                //
-                let mut has_spread = false;
-                props.retain(|node| match node {
-                    PropOrSpread::Prop(node) => match &**node {
-                        Prop::Shorthand(..) => false,
-                        Prop::KeyValue(KeyValueProp { key, value }) => {
-                            if let PropName::Computed(e) = key {
-                                if e.expr.may_have_side_effects() {
-                                    return true;
-                                }
-                            }
-
-                            value.may_have_side_effects()
-                        }
-                        Prop::Getter(GetterProp { key, .. })
-                        | Prop::Setter(SetterProp { key, .. })
-                        | Prop::Method(MethodProp { key, .. }) => {
-                            if let PropName::Computed(e) = key {
-                                e.expr.may_have_side_effects()
-                            } else {
-                                false
-                            }
-                        }
-                        Prop::Assign(..) => {
-                            unreachable!("assign property in object literal is not a valid syntax")
-                        }
-                    },
-                    PropOrSpread::Spread(SpreadElement { .. }) => {
-                        has_spread = true;
-                        true
-                    }
-                });
-
-                if has_spread {
-                    v.push(Box::new(Expr::Object(ObjectLit { span, props })))
-                } else {
-                    props.into_iter().for_each(|prop| match prop {
-                        PropOrSpread::Prop(node) => match *node {
-                            Prop::Shorthand(..) => {}
-                            Prop::KeyValue(KeyValueProp { key, value }) => {
-                                if let PropName::Computed(e) = key {
-                                    add_effects(v, e.expr);
-                                }
-
-                                add_effects(v, value)
-                            }
-                            Prop::Getter(GetterProp { key, .. })
-                            | Prop::Setter(SetterProp { key, .. })
-                            | Prop::Method(MethodProp { key, .. }) => {
-                                if let PropName::Computed(e) = key {
-                                    add_effects(v, e.expr)
-                                }
-                            }
-                            Prop::Assign(..) => unreachable!(
-                                "assign property in object literal is not a valid syntax"
-                            ),
-                        },
-                        _ => unreachable!(),
-                    })
-                }
-            }
-
-            Expr::Array(ArrayLit { elems, .. }) => {
-                elems.into_iter().filter_map(|e| e).fold(v, |v, e| {
-                    add_effects(v, e.expr);
-
-                    v
-                });
-            }
-
-            Expr::TaggedTpl { .. } => unimplemented!("add_effects for tagged template literal"),
-            Expr::Tpl { .. } => unimplemented!("add_effects for template literal"),
-            Expr::Class(ClassExpr { .. }) => unimplemented!("add_effects for class expression"),
-
-            Expr::JSXMember(..)
-            | Expr::JSXNamespacedName(..)
-            | Expr::JSXEmpty(..)
-            | Expr::JSXElement(..)
-            | Expr::JSXFragment(..) => unreachable!("simplifying jsx"),
-
-            Expr::TsTypeAssertion(TsTypeAssertion { expr, .. })
-            | Expr::TsNonNull(TsNonNullExpr { expr, .. })
-            | Expr::TsAs(TsAsExpr { expr, .. })
-            | Expr::TsConstAssertion(TsConstAssertion { expr, .. }) => add_effects(v, expr),
-            Expr::OptChain(e) => add_effects(v, e.expr),
-
-            Expr::Invalid(..) => unreachable!(),
-        }
-    }
-
     let mut exprs = exprs.into_iter().fold(vec![], |mut v, e| {
-        add_effects(&mut v, e);
+        extract_side_effects_to(&mut v, e);
         v
     });
 
@@ -1863,6 +1855,154 @@ where
         exprs.push(Box::new(val));
 
         Expr::Seq(SeqExpr { exprs, span })
+    }
+}
+
+/// Add side effects of `expr` to `to`.
+//
+/// Thie function preserves order and conditions. (think a() ? yield b() : c())
+#[allow(clippy::vec_box)]
+pub fn extract_side_effects_to(to: &mut Vec<Box<Expr>>, expr: Box<Expr>) {
+    let expr = *expr;
+    match expr {
+        Expr::Lit(..)
+        | Expr::This(..)
+        | Expr::Fn(..)
+        | Expr::Arrow(..)
+        | Expr::Ident(..)
+        | Expr::PrivateName(..) => {}
+
+        // In most case, we can do nothing for this.
+        Expr::Update(_) | Expr::Assign(_) | Expr::Yield(_) | Expr::Await(_) => {
+            to.push(Box::new(expr))
+        }
+
+        // TODO
+        Expr::MetaProp(_) => to.push(Box::new(expr)),
+
+        Expr::Call(_) => to.push(Box::new(expr)),
+        Expr::New(e) => {
+            // Known constructors
+            match *e.callee {
+                Expr::Ident(Ident { ref sym, .. }) => {
+                    if *sym == js_word!("Date") && e.args.is_empty() {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+
+            to.push(Box::new(Expr::New(e)))
+        }
+        Expr::Member(_) => to.push(Box::new(expr)),
+
+        // We are at here because we could not determine value of test.
+        //TODO: Drop values if it does not have side effects.
+        Expr::Cond(_) => to.push(Box::new(expr)),
+
+        Expr::Unary(UnaryExpr { arg, .. }) => extract_side_effects_to(to, arg),
+        Expr::Bin(BinExpr { left, right, .. }) => {
+            extract_side_effects_to(to, left);
+            extract_side_effects_to(to, right);
+        }
+        Expr::Seq(SeqExpr { exprs, .. }) => exprs
+            .into_iter()
+            .for_each(|e| extract_side_effects_to(to, e)),
+
+        Expr::Paren(e) => extract_side_effects_to(to, e.expr),
+
+        Expr::Object(ObjectLit {
+            span, mut props, ..
+        }) => {
+            //
+            let mut has_spread = false;
+            props.retain(|node| match node {
+                PropOrSpread::Prop(node) => match &**node {
+                    Prop::Shorthand(..) => false,
+                    Prop::KeyValue(KeyValueProp { key, value }) => {
+                        if let PropName::Computed(e) = key {
+                            if e.expr.may_have_side_effects() {
+                                return true;
+                            }
+                        }
+
+                        value.may_have_side_effects()
+                    }
+                    Prop::Getter(GetterProp { key, .. })
+                    | Prop::Setter(SetterProp { key, .. })
+                    | Prop::Method(MethodProp { key, .. }) => {
+                        if let PropName::Computed(e) = key {
+                            e.expr.may_have_side_effects()
+                        } else {
+                            false
+                        }
+                    }
+                    Prop::Assign(..) => {
+                        unreachable!("assign property in object literal is not a valid syntax")
+                    }
+                },
+                PropOrSpread::Spread(SpreadElement { .. }) => {
+                    has_spread = true;
+                    true
+                }
+            });
+
+            if has_spread {
+                to.push(Box::new(Expr::Object(ObjectLit { span, props })))
+            } else {
+                props.into_iter().for_each(|prop| match prop {
+                    PropOrSpread::Prop(node) => match *node {
+                        Prop::Shorthand(..) => {}
+                        Prop::KeyValue(KeyValueProp { key, value }) => {
+                            if let PropName::Computed(e) = key {
+                                extract_side_effects_to(to, e.expr);
+                            }
+
+                            extract_side_effects_to(to, value)
+                        }
+                        Prop::Getter(GetterProp { key, .. })
+                        | Prop::Setter(SetterProp { key, .. })
+                        | Prop::Method(MethodProp { key, .. }) => {
+                            if let PropName::Computed(e) = key {
+                                extract_side_effects_to(to, e.expr)
+                            }
+                        }
+                        Prop::Assign(..) => {
+                            unreachable!("assign property in object literal is not a valid syntax")
+                        }
+                    },
+                    _ => unreachable!(),
+                })
+            }
+        }
+
+        Expr::Array(ArrayLit { elems, .. }) => {
+            elems.into_iter().filter_map(|e| e).fold(to, |v, e| {
+                extract_side_effects_to(v, e.expr);
+
+                v
+            });
+        }
+
+        Expr::TaggedTpl { .. } => unimplemented!("add_effects for tagged template literal"),
+        Expr::Tpl { .. } => unimplemented!("add_effects for template literal"),
+        Expr::Class(ClassExpr { .. }) => unimplemented!("add_effects for class expression"),
+
+        Expr::JSXMember(..)
+        | Expr::JSXNamespacedName(..)
+        | Expr::JSXEmpty(..)
+        | Expr::JSXElement(..)
+        | Expr::JSXFragment(..) => unreachable!("simplifying jsx"),
+
+        Expr::TsTypeAssertion(TsTypeAssertion { expr, .. })
+        | Expr::TsNonNull(TsNonNullExpr { expr, .. })
+        | Expr::TsAs(TsAsExpr { expr, .. })
+        | Expr::TsConstAssertion(TsConstAssertion { expr, .. }) => {
+            extract_side_effects_to(to, expr)
+        }
+        Expr::OptChain(e) => extract_side_effects_to(to, e.expr),
+
+        Expr::Invalid(..) => unreachable!(),
     }
 }
 

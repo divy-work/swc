@@ -1,5 +1,7 @@
 //! Copied from PeepholeIntegrationTest from the google closure compiler.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use swc_common::chain;
 use swc_common::Mark;
 use swc_ecma_parser::EsConfig;
@@ -14,7 +16,9 @@ use swc_ecma_transforms_compat::es2020::class_properties;
 use swc_ecma_transforms_compat::es3;
 use swc_ecma_transforms_module::common_js::common_js;
 use swc_ecma_transforms_module::import_analysis::import_analyzer;
+use swc_ecma_transforms_module::util::Scope;
 use swc_ecma_transforms_optimization::simplify::dce::dce;
+use swc_ecma_transforms_optimization::simplify::expr_simplifier;
 use swc_ecma_transforms_optimization::simplify::inlining::inlining;
 use swc_ecma_transforms_optimization::simplify::simplifier;
 use swc_ecma_transforms_proposal::decorators;
@@ -530,20 +534,27 @@ test!(
         dynamic_import: true,
         ..Default::default()
     }),
-    |_| chain!(
-        strip(),
-        decorators(Default::default()),
-        class_properties(),
-        simplifier(Default::default()),
-        es2018(),
-        es2017(),
-        es2016(),
-        es2015(Mark::fresh(Mark::root()), Default::default()),
-        es3(true),
-        import_analyzer(),
-        inject_helpers(),
-        common_js(Mark::fresh(Mark::root()), Default::default()),
-    ),
+    |t| {
+        let scope = Rc::new(RefCell::new(Scope::default()));
+        chain!(
+            strip(),
+            decorators(Default::default()),
+            class_properties(),
+            simplifier(Default::default()),
+            es2018(),
+            es2017(),
+            es2016(),
+            es2015(
+                Mark::fresh(Mark::root()),
+                Some(t.comments.clone()),
+                Default::default()
+            ),
+            es3(true),
+            import_analyzer(Rc::clone(&scope)),
+            inject_helpers(),
+            common_js(Mark::fresh(Mark::root()), Default::default(), Some(scope)),
+        )
+    },
     issue_389_3,
     "
 import Foo from 'foo';
@@ -559,4 +570,21 @@ function _interopRequireDefault(obj) {
 }
 _foo.default.bar = true;
 "
+);
+
+test!(
+    Syntax::default(),
+    |_| expr_simplifier(),
+    issue_1619_1,
+    r#"
+    "use strict";
+	
+    console.log("\x00" + "\x31");
+
+    "#,
+    r#"
+    "use strict";
+    console.log("\x001");
+    "#,
+    ok_if_code_eq
 );

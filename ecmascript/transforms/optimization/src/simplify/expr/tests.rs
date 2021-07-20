@@ -1,10 +1,10 @@
-use super::SimplifyExpr;
+use super::expr_simplifier;
 use swc_ecma_transforms_testing::test_transform;
 
 fn fold(src: &str, expected: &str) {
     test_transform(
         ::swc_ecma_parser::Syntax::default(),
-        |_| SimplifyExpr { changed: false },
+        |_| expr_simplifier(),
         src,
         expected,
         true,
@@ -424,7 +424,7 @@ fn test_unary_ops_1() {
 
     // These cases are handled here.
     fold("a=!true", "a=false");
-    fold("a=!10", "a=false");
+    fold("a=!10", "a=!10");
     fold("a=!false", "a=true");
     fold_same("a=!foo()");
     //fold("a=-0", "a=-0.0");
@@ -986,6 +986,7 @@ fn test_fold_get_elem2_1() {
     fold("x = 'string'[0]", "x = 's'");
     fold("x = 's'[0]", "x = 's'");
     fold("x = '\\uD83D\\uDCA9'[0]", "x = '\\uD83D'");
+    fold("x = '\\uD83D\\uDCA9'[1]", "x = '\\uDCA9'");
 }
 
 #[test]
@@ -1140,6 +1141,7 @@ fn test_fold_instance_of() {
 
     // These cases is foldable, but no handled currently.
     fold("new Foo() instanceof Object", "new Foo(), true;");
+
     // These would require type information to fold.
     fold_same("[] instanceof Foo");
     fold_same("({}) instanceof Foo");
@@ -1148,6 +1150,7 @@ fn test_fold_instance_of() {
 
     // An unknown value should never be folded.
     fold_same("x instanceof Foo");
+    fold_same("x instanceof Object");
 }
 
 #[test]
@@ -1302,9 +1305,9 @@ fn test_fold_literals_as_numbers() {
 
 #[test]
 fn test_not_fold_back_to_true_false() {
-    fold("!0", "true");
-    fold("!1", "false");
-    fold("!3", "false");
+    fold("!0", "!0");
+    fold("!1", "!1");
+    fold("!3", "!3");
 }
 
 #[test]
@@ -1530,4 +1533,25 @@ fn test_es6_features() {
         "function foo() {return `${false && y}`}",
         "function foo() {return `${false}`}",
     );
+}
+
+#[test]
+fn issue_1674() {
+    fold(
+        "
+            let foo = 'info';
+
+            var bar = [foo, (foo = 'other')][0];
+
+            console.log(foo);
+            console.log(bar);
+        ",
+        "
+            var _foo;
+            let foo = 'info';
+            var bar = (_foo = foo, foo = 'other', _foo);
+            console.log(foo);
+            console.log(bar);
+        ",
+    )
 }

@@ -11,6 +11,8 @@ on:
 
 jobs:
   build:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
     name: Build - wasm for web
     runs-on: ubuntu-latest
     steps:
@@ -36,15 +38,11 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build
-        run: (cd wasm && wasm-pack build  --release --scope=swc)
+        run: (cd wasm && wasm-pack build  --release --scope=swc --target web)
 
       - name: Rename
         run: |
           sed -i'' -e 's/"name": "@swc\/wasm"/"name": "@swc\/wasm-web"/g' package.json
-        working-directory: wasm/pkg
-
-      - name: Include *_bg files
-        run: jq '.files += ["wasm_bg.js", "wasm_bg.wasm.d.ts"]' package.json > package.json
         working-directory: wasm/pkg
 
       - name: Publish

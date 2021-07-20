@@ -308,6 +308,12 @@ fn test_fold_useless_do_extra() {
 }
 
 #[test]
+fn test_no_fold_do_with_conditional_stopper() {
+    test_same("do { if (Date.now() > 0) break; } while (0);");
+    test_same("do { if (Date.now() > 0) continue; } while (0);");
+}
+
+#[test]
 fn test_fold_empty_do() {
     test("do { } while(true);", "for (;;);");
 }
@@ -1759,4 +1765,30 @@ fn return_function_hoisting() {
             return foo();
         }",
     );
+}
+
+#[test]
+fn issue_1825() {
+    test(
+        "
+        function p(){
+            throw new Error('Something');
+        }
+        
+        while ((p(), 1)) {
+            console.log('Hello world');
+        }
+        ",
+        "
+        function p() {
+            throw new Error('Something');
+        }
+        while(p(), 1)console.log('Hello world');
+        ",
+    );
+}
+
+#[test]
+fn issue_1851_1() {
+    test("x ?? (x = 'abc');", "x ?? (x = 'abc');");
 }

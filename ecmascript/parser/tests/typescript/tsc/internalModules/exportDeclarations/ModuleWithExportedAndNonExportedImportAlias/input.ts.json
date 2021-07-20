@@ -330,6 +330,7 @@
                       },
                       "decorators": [],
                       "accessibility": "public",
+                      "override": false,
                       "readonly": false,
                       "param": {
                         "type": "Identifier",
@@ -391,6 +392,7 @@
                       },
                       "decorators": [],
                       "accessibility": "public",
+                      "override": false,
                       "readonly": false,
                       "param": {
                         "type": "Identifier",
@@ -503,6 +505,7 @@
             },
             "declare": false,
             "isExport": true,
+            "isTypeOnly": false,
             "id": {
               "type": "Identifier",
               "span": {
@@ -533,6 +536,7 @@
             },
             "declare": false,
             "isExport": false,
+            "isTypeOnly": false,
             "id": {
               "type": "Identifier",
               "span": {
